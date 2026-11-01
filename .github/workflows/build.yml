@@ -3,49 +3,130 @@ name: build
 on:
   push:
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Publish a GitHub release with this tag (e.g. v0.1.0). Leave empty to just build."
+        required: false
+        default: ""
 
 jobs:
-  test:
-    name: Effects engine (host tests)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: make test
-      - uses: actions/upload-artifact@v4
-        with:
-          name: renders
-          path: build/test/*.wav
-
   firmware:
-    name: Firmware (sp1fx.bin)
+    name: SP-1 firmware (sp1fx.bin)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           path: sp-1fx
+      - name: Cache the Zephyr SDK and tree
+        id: zcache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/zephyr-sdk-0.17.4
+            ws
+          key: zephyr-4.3.1-sdk-0.17.4-nordic
       - name: Zephyr SDK 0.17.4 (arm only)
+        if: steps.zcache.outputs.cache-hit != 'true'
         run: |
           cd $HOME
           curl -sSL -o sdk.tar.xz https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.4/zephyr-sdk-0.17.4_linux-x86_64_minimal.tar.xz
           tar xf sdk.tar.xz && rm sdk.tar.xz
           curl -sSL -o arm.tar.xz https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.4/toolchain_linux-x86_64_arm-zephyr-eabi.tar.xz
           tar xf arm.tar.xz -C zephyr-sdk-0.17.4 && rm arm.tar.xz
-          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4" >> $GITHUB_ENV
-      - name: Zephyr v4.3.1
+      - name: Zephyr v4.3.1 (hal_nordic, cmsis)
+        if: steps.zcache.outputs.cache-hit != 'true'
         run: |
           pip install west
           git clone --depth 1 --branch v4.3.1 https://github.com/zephyrproject-rtos/zephyr ws/zephyr
           cd ws && west init -l zephyr
           west config manifest.project-filter -- '-.*,+hal_nordic,+cmsis_6,+cmsis'
           west update --narrow -o=--depth=1
-          pip install -r zephyr/scripts/requirements-base.txt
-          echo "ZEPHYR_BASE=$GITHUB_WORKSPACE/ws/zephyr" >> $GITHUB_ENV
       - name: Build
-        run: cd ws && ../sp-1fx/scripts/build-firmware.sh
-      - name: CPU estimate (Cortex-M4, worst case)
-        run: pip install unicorn capstone && python3 sp-1fx/tools/bench_m4.py -v
+        run: |
+          pip install west -r ws/zephyr/scripts/requirements-base.txt
+          export ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 ZEPHYR_BASE=$GITHUB_WORKSPACE/ws/zephyr
+          cd ws && ../sp-1fx/scripts/build-firmware.sh
+      - name: Check the binary
+        run: |
+          # flashable by the SP-1 bootloader: loaded at 0x20000, at most 0xDF000 bytes, the vector
+          # table first (initial stack in RAM, reset handler inside the image)
+          python3 - sp-1fx/sp1fx.bin <<'PY'
+          import struct, sys
+          b = open(sys.argv[1], "rb").read()
+          sp, reset = struct.unpack("<II", b[:8])
+          print(f"size {len(b)}, initial SP {sp:#x}, reset {reset:#x}")
+          assert 0 < len(b) <= 0xDF000, "too big for the application slot"
+          assert 0x20000000 < sp <= 0x20040000, "initial stack pointer is not in RAM"
+          assert reset & 1 and 0x20000 <= (reset & ~1) < 0x20000 + len(b), "reset handler outside the image"
+          PY
+          # and it fits: RAM used, from the build
+          grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1fx/build/firmware/zephyr/.config
+      - name: CPU estimate (Cortex-M4, every effect fully in)
+        run: |
+          pip install unicorn capstone
+          ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1fx/tools/bench_m4.py -v | tee bench.txt
+          # one core is 100%; keep the worst case clear of it
+          awk '/of one core/ { gsub("%", "", $4); exit !($4 + 0 <= 80) }' bench.txt
       - uses: actions/upload-artifact@v4
         with:
           name: sp1fx-firmware
           path: sp-1fx/sp1fx.bin
+
+  test:
+    name: Effects engine tests (host)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the checks
+        run: |
+          mkdir -p build/test
+          make test | tee build/test/results.txt
+      - name: Check the results
+        run: |
+          r=build/test/results.txt
+          grep -q "^PASS: 0 failed" $r
+          # the sound's promises
+          grep -q "^blocks of 256 and of 1..300: same output .* ok" $r
+          grep -q "^rest: noise and aliasing on a -6 dBFS 1 kHz tone .* ok" $r
+          grep -q "^rest: a 15 kHz tone is gone, no alias .* ok" $r
+          grep -q "^full chain: peak under the -0.3 dBFS ceiling .* ok" $r
+          grep -q "^sweep all faders: no clicks .* ok" $r
+          grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
+          grep -q "^reverb: no old tail after the fader went down and up .* ok" $r
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-output
+          path: build/test/
+
+  release:
+    name: Publish release
+    # runs for: a pushed v* tag, a release created on the website, or a manual run with a tag filled in
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' || inputs.release_tag != ''
+    needs: [firmware, test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: sp1fx-firmware
+      - name: Create GitHub release with sp1fx.bin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" sp1fx.bin --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" sp1fx.bin \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "SP-1FX $TAG (test build)" \
+              --notes-file .github/release-notes.md \
+              --prerelease
+          fi
