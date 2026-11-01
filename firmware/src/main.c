@@ -928,8 +928,10 @@ int main(void)
 			int b = (int)((tick % 100u) < 50u ? (tick % 50u) : 50u - (tick % 50u)) * 3;
 			for (int i = 0; i < 4; i++) { led_set(g_sta_duty, i, b); led_set(g_trk_duty, i, 0); }
 		} else {
-			float amt[4] = { fpos[0], fpos[1] < 0.5f ? 1.0f - 2.0f * fpos[1] : 2.0f * fpos[1] - 1.0f,
-					 fpos[2], fpos[3] };
+			/* the filter's light: dark across its flat middle (0.4..0.6), then up to either end */
+			float fd = fpos[1] < 0.5f ? 0.5f - fpos[1] : fpos[1] - 0.5f;
+			fd = fd < 0.1f ? 0.0f : (fd - 0.1f) / 0.4f;
+			float amt[4] = { fpos[0], fd, fpos[2], fpos[3] };
 			for (int i = 0; i < 4; i++)
 				led_set(g_trk_duty, i, g_fx_off[i] ? 6 : (int)(amt[i] * amt[i] * LED_DIM));
 			if (now < vol_show_until) {

@@ -276,7 +276,7 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
 
 /* =============================================================== 2: filter ==== */
 
-#define FLT_DEAD 0.04f /* half-width of the flat zone around the centre */
+#define FLT_DEAD 0.10f /* half-width of the flat zone around the centre: easy to find by feel */
 
 STAGE static void filter_control(fx_filter *f, float pos, float sr)
 {
