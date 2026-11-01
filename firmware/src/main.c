@@ -6,13 +6,15 @@
  *
  * Controls
  *   faders 1-4        the four effects (see fx/fx.h)
+ *   TRACK 1-4         that effect off/on (it glides to rest and back to its fader)
  *   PLAY              bypass on/off (the effects glide to rest; the limiter stays as a guard)
  *   VOL + / VOL -     output volume, 3 dB steps
  *   FUNCTION, hold    power on (1.5 s) / power off (2.5 s)
  *   TRACK 1 + 4, hold 3 s: reset into the bootloader for flashing
  *
  * Lights
- *   track lights      how far each effect is in (filter: distance from the centre)
+ *   track lights      how far each effect is in (filter: distance from the centre); a faint
+ *                     glow when that effect is switched off
  *   status lights     limiter gain reduction (0.5, 2, 4, 8 dB); volume for a second after a change;
  *                     all four slowly breathing = bypass
  *
@@ -232,6 +234,15 @@ static bool adc_scan(void)
  *   PLAY 1804 | PLAY+T1 1861 ...
  * Only the two codes this firmware uses are decoded, each in its own band. */
 static bool is_play(int v)  { return v >= 1773 && v < 1835; }
+/* one track button alone (T1 213, T2 404, T3 728, T4 1209), each band clear of every chord */
+static int single_track(int v)
+{
+	if (v >= 150 && v < 300) return 0;
+	if (v >= 330 && v < 470) return 1;
+	if (v >= 680 && v < 790) return 2;
+	if (v >= 1160 && v < 1256) return 3;
+	return -1;
+}
 static bool combo_1_4(int v) { return v >= 1256 && v < 1347; }   /* ONLY exactly 1+4 */
 
 enum { VOL_NONE = -1, VOL_RWD, VOL_DOWN, VOL_FWD, VOL_UP, VOL_BOTH };
@@ -522,6 +533,7 @@ static int g_i2s_rc = 1;
 static fx_engine g_fx;                       /* ~104 KB, mostly the reverb */
 static volatile float g_fader[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
 static volatile bool g_bypass;
+static volatile bool g_fx_off[4];            /* track buttons switch each effect off and on */
 static volatile int g_vol_db = -6;           /* output volume, 3 dB steps, -60..0 */
 static volatile bool g_muted;                /* power-off fade */
 static float g_vol_lin;
@@ -570,7 +582,8 @@ static void audio_block(int32_t *out)
 		fx_set_fader(&g_fx, FX_REVERB, 0.0f);
 		fx_set_fader(&g_fx, FX_LIMITER, 0.0f);
 	} else {
-		for (int k = 0; k < 4; k++) fx_set_fader(&g_fx, k, g_fader[k]);
+		static const float rest[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
+		for (int k = 0; k < 4; k++) fx_set_fader(&g_fx, k, g_fx_off[k] ? rest[k] : g_fader[k]);
 	}
 	fx_process(&g_fx, bufl, bufr, BLK_FRAMES);
 
@@ -823,8 +836,8 @@ int main(void)
 
 	float fpos[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
 	int64_t pwr_t = -1, dfu_t = -1, vol_show_until = 0, hp_next = 0, stat_next = 0;
-	int last_vol = VOL_NONE, hp_votes = 0, play_n = 0;
-	bool play_armed = false;
+	int last_vol = VOL_NONE, hp_votes = 0, play_n = 0, trk_cand = -1, trk_n = 0, odd_n = 0;
+	bool play_armed = false, chord = false;
 	uint32_t tick = 0;
 	bool first = true;
 
@@ -853,15 +866,30 @@ int main(void)
 				dfu_t = -1;
 			}
 
-			/* PLAY: bypass. Seen in its band for two scans, then fired at true idle, so a
-			 * chord passing through PLAY's band on the way somewhere else doesn't count. */
-			if (is_play(g_adc[CH_TRACKS])) { if (++play_n >= 2) play_armed = true; }
-			else play_n = 0;
-			if (g_adc[CH_TRACKS] < 110) {
-				if (play_armed) g_bypass = !g_bypass;
-				play_armed = false;
-			} else if (!is_play(g_adc[CH_TRACKS]) && play_n == 0 && g_adc[CH_TRACKS] > 1835) {
-				play_armed = false;   /* PLAY plus a track: not a bypass press */
+			/* PLAY: bypass all; TRACK n: effect n off/on. A press counts once it has sat in its
+			 * own band for two scans, and fires at true idle; anything else seen on the way (a
+			 * chord, PLAY plus a track, the 1+4 bootloader hold) cancels it. */
+			int tv = g_adc[CH_TRACKS];
+			int st = single_track(tv);
+			if (tv < 110) {
+				if (!chord) {
+					if (play_armed) g_bypass = !g_bypass;
+					else if (trk_cand >= 0 && trk_n >= 2) g_fx_off[trk_cand] = !g_fx_off[trk_cand];
+				}
+				play_armed = false; trk_cand = -1; trk_n = 0; play_n = 0; odd_n = 0; chord = false;
+			} else if (is_play(tv)) {
+				if (++play_n >= 2 && trk_cand < 0) play_armed = true;
+			} else if (st >= 0 && (trk_cand < 0 || trk_cand == st) && !play_armed) {
+				trk_cand = st;
+				trk_n++;
+			} else if (st >= 0) {
+				chord = true;   /* a second button, or PLAY then a track */
+			} else {
+				play_n = 0;
+				/* between bands: a finger landing or lifting reads here for a scan; a code
+				 * that stays here is a chord */
+				odd_n++;
+				if (odd_n >= 2) chord = true;
 			}
 
 			if (vol != last_vol) {
@@ -902,7 +930,8 @@ int main(void)
 		} else {
 			float amt[4] = { fpos[0], fpos[1] < 0.5f ? 1.0f - 2.0f * fpos[1] : 2.0f * fpos[1] - 1.0f,
 					 fpos[2], fpos[3] };
-			for (int i = 0; i < 4; i++) led_set(g_trk_duty, i, (int)(amt[i] * amt[i] * LED_DIM));
+			for (int i = 0; i < 4; i++)
+				led_set(g_trk_duty, i, g_fx_off[i] ? 6 : (int)(amt[i] * amt[i] * LED_DIM));
 			if (now < vol_show_until) {
 				int lv = (g_vol_db + 60) * 4 / 60;   /* 0..4 */
 				for (int i = 0; i < 4; i++) led_set(g_sta_duty, i, i < lv ? LED_DIM : 0);

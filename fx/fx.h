@@ -8,9 +8,14 @@
  *   fader 4  LIMITER  mastering limiter, always on at -0.3 dBFS; the fader drives into it
  *                     (0 to +12 dB).
  *
- * Float, stereo, 48 kHz, any block size: parameters move every FX_CHUNK frames counted from the
- * start, so the output does not depend on how the audio is cut into blocks. No libm, no doubles,
- * no heap: an fx_engine is about 80 KB and should be a static. */
+ * The sound: warm and a little lo-fi, but clean. In and out at 48 kHz; at the input a warm stage
+ * (gentle tape saturation, a slight treble dip), then the effects run at 24 kHz between two
+ * polyphase IIR half-band filters (flat to 11 kHz, -72 dB at 13 kHz, below -140 dB from 14 kHz):
+ * a soft top without grit, and half the CPU.
+ *
+ * Float, stereo, any block size: parameters move every FX_CHUNK core frames counted from the start,
+ * so the output does not depend on how the audio is cut into blocks. No libm, no doubles, no heap:
+ * an fx_engine is about 55 KB and should be a static. */
 #ifndef SP1_FX_H
 #define SP1_FX_H
 
@@ -18,7 +23,7 @@
 #include "fx_math.h"
 
 #define FX_SLOTS 4
-#define FX_CHUNK 32
+#define FX_CHUNK 16   /* core frames (24 kHz) between parameter updates */
 
 enum { FX_DUB, FX_FILTER, FX_REVERB, FX_LIMITER };
 
@@ -32,9 +37,11 @@ typedef struct {
     float dl[2][DUB_DL];
     float wow_c, wow_s, wow_rc, wow_rs, flt_c, flt_s, flt_rc, flt_rs;
     float wow_depth, flt_depth;
-    fx_svf hp, shelf, cut, pres, lp;
+    float hp_c;
+    fx_svf shelf, cut, pres, lp;
     fx_svf_state st[2][5];
     float env, att, rel, thr, slope, knee, makeup;
+    float sc_lp[2], sc_c;   /* the detector's high-pass (sidechain): one-poles at 150 Hz */
     float drive, inv_drive, sat_mix, bias, bias_out, gain;
     float dc_x[2], dc_y[2], dc_r;
     uint32_t rng, rng_c[2];
@@ -57,8 +64,7 @@ typedef struct {
 } fx_filter;
 
 /* ---- 3: reverb ---- */
-/* Runs at half rate (24 kHz): the tail is darker than 7.5 kHz anyway, and it halves the CPU and
- * the memory. Lengths below are at 24 kHz. */
+/* Lengths are at 24 kHz, the core rate. */
 #define REV_LINES 8
 #define REV_MAX 1408   /* longest line plus modulation room */
 #define REV_PRE 512
@@ -69,37 +75,49 @@ typedef struct {
     float amt, wet;
     int live;
     float line[REV_LINES][REV_MAX];
-    int len[REV_LINES], wp[REV_LINES];
+    int len[REV_LINES], wp;   /* all lines move together: one write position */
     float gain[REV_LINES], damp_z[REV_LINES], damp;
     float pre[REV_PRE];
     int pre_len, pre_w;
     float ap[REV_AP][REV_AP_MAX];
     int ap_len[REV_AP], ap_pos[REV_AP];
     float lfo1_c, lfo1_s, lfo1_rc, lfo1_rs, lfo2_c, lfo2_s, lfo2_rc, lfo2_rs, mod_depth;
-    float in_lp, in_lpc, in_hp, in_hpc;   /* input band: one-poles at 48 kHz */
-    float half_in;                         /* the first frame of the pair */
-    int half;                              /* 0: waiting for the pair's first frame */
-    float wl0, wr0, wl1, wr1;              /* the last two wet outputs, for the 48 kHz in-between */
-    float sr;                              /* the outside rate (48 kHz) */
+    float in_lp, in_lpc, in_hp, in_hpc;   /* the send's band: one-poles */
+    float sr;
 } fx_reverb;
 
 /* ---- 4: limiter ---- */
-#define LIM_LA 48      /* look-ahead: 1 ms; latency LIM_LA - 1 frames */
+#define LIM_LA 24      /* look-ahead: 1 ms at 24 kHz; latency LIM_LA - 1 core frames */
+#define LIM_SEG 8      /* the peak hold works in segments of 8 frames */
+#define LIM_NSEG (LIM_LA / LIM_SEG)
 
 typedef struct {
     float drive, drive_target, dstep, ceiling;
     float dl[2][LIM_LA];
-    float red[LIM_LA];        /* gain reduction (1 - gain) needed per frame */
-    int dq[LIM_LA], dq_head, dq_tail, dq_n; /* frames in the window whose reduction is not beaten */
+    float seg[LIM_NSEG];      /* the deepest reduction needed in each of the last segments */
+    float cur, held;          /* this segment so far; the finished segments */
+    int si, sn;               /* segment index, frames into it */
     float box[LIM_LA], box_sum;
-    int pos, n;
+    int pos;
     float gr, rel;            /* reduction applied, release coefficient */
     float meter;              /* deepest reduction since last read, 0..1 */
 } fx_limiter;
 
+#define HB_C 10        /* half-band allpass coefficients */
+
 typedef struct {
-    float sr;
-    int phase;                /* frames into the current chunk */
+    float sr, cr;             /* outside rate (48 kHz), core rate (24 kHz) */
+    int phase;                /* core frames into the current chunk */
+    /* warm stage, at the outside rate */
+    float warm_lp[2], warm_c;
+    /* 48 -> 24 kHz: allpass states (each section's last output; a section's last input is the
+     * one before it's last output, so only the two path inputs are kept besides), the pair's first
+     * frame, which frame is next */
+    float dy[2][HB_C], dx0[2], dx1[2], dfirst[2];
+    int dodd;
+    /* 24 -> 48 kHz: the same, and the pair's second frame */
+    float uy[2][HB_C], ux0[2], ux1[2], usecond[2];
+    int uodd;
     float fader[FX_SLOTS];    /* latest positions, 0..1 */
     fx_dub dub;
     fx_filter filter;

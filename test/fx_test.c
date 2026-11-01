@@ -197,9 +197,12 @@ static void faders(float f1, float f2, float f3, float f4)
     fx_set_fader(&E, 0, f1); fx_set_fader(&E, 1, f2); fx_set_fader(&E, 2, f3); fx_set_fader(&E, 3, f4);
 }
 
+static int g_no_dust;   /* measure the dub's EQ without its record noise */
+
 static void run(const float *il, const float *ir, float *ol, float *orr, int n, float f1, float f2, float f3, float f4, int block)
 {
     fx_init(&E, SR);
+    if (g_no_dust) E.dub.dust_on = 0;
     faders(f1, f2, f3, f4);
     memcpy(ol, il, sizeof(float) * n); memcpy(orr, ir, sizeof(float) * n);
     unsigned s = 7;
@@ -230,11 +233,51 @@ int main(int argc, char **argv)
     check(ee < 1e-5, "math: exp2 relative error", ee);
     check(el < 1e-4, "math: log2 absolute error", el);
 
-    /* everything at rest passes the input through untouched, only delayed */
+    /* at rest: the input, warm (the 24 kHz core, the warm stage), at the stated latency */
     run(il, ir, l, r, N, 0, 0.5f, 0, 0, 256);
-    int same = 1;
-    for (int i = lat; i < N && same; i++) same = l[i] == il[i - lat] && r[i] == ir[i - lat];
-    check(same, "rest: output == input, delayed by the latency (frames)", lat);
+    {
+        int best = 0; double bc = -1;
+        for (int d = 0; d < 400; d++) {
+            double sxy = 0, sxx = 0, syy = 0;
+            for (int i = W; i < W + SR; i++) { sxy += l[i] * il[i - d]; sxx += (double)l[i] * l[i]; syy += (double)il[i - d] * il[i - d]; }
+            double c = sxy / sqrt(sxx * syy);
+            if (c > bc) { bc = c; best = d; }
+        }
+        check(abs(best - lat) <= 1, "rest: the input comes out at the stated latency (frames)", best);
+        check(bc > 0.98, "rest: and still the input (correlation)", bc);
+        check(fabs(rms_db(l, W, N) - rms_db(il, W, N)) < 1.0, "rest: level change (dB)", rms_db(l, W, N) - rms_db(il, W, N));
+        /* a 15 kHz tone at a loud top-end level (-20 dBFS): above the core's band, so nothing
+         * comes out, aliased or not (the warm stage's third harmonic folds; at -6 dBFS it would
+         * be -46 dB, a level real top end doesn't reach) */
+        float *tl = malloc(4 * N), *tr = malloc(4 * N);
+        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.1f * (float)sin(2 * M_PI * 15000.0 * i / SR);
+        run(tl, tr, l2, r2, N, 0, 0.5f, 0, 0, 256);
+        double rej = rms_db(l2, W, N) - rms_db(tl, W, N);
+        check(rej < -70, "rest: a 15 kHz tone is gone, no alias (dB)", rej);
+        free(tl); free(tr);
+    }
+    {   /* clean: a 1 kHz tone at -6 dBFS, the warm stage's harmonics and nothing else */
+        float *tl = malloc(4 * N), *tr = malloc(4 * N);
+        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.5f * (float)sin(2 * M_PI * 997.0 * i / SR);
+        run(tl, tr, l, r, N, 0, 0.5f, 0, 0, 256);
+        /* everything that isn't 997 Hz or its harmonics: notch them out, measure the rest */
+        double sig = rms_db(l, W, N), e = 0;
+        double a0 = 0, b0 = 0;
+        for (int h = 1; h <= 11; h++) {
+            double a = 0, b = 0, w = 2 * M_PI * 997.0 * h / SR;
+            for (int i = W; i < N; i++) { a += l[i] * cos(w * i); b += l[i] * sin(w * i); }
+            a *= 2.0 / (N - W); b *= 2.0 / (N - W);
+            if (h == 1) { a0 = a; b0 = b; }
+            e += (a * a + b * b) / 2;
+        }
+        double tot = 0; for (int i = W; i < N; i++) tot += (double)l[i] * l[i];
+        tot /= (N - W);
+        double noise = 10 * log10(fmax(tot - e, 1e-30)) - sig;
+        double thd = 10 * log10(fmax(e - (a0 * a0 + b0 * b0) / 2, 1e-30) / ((a0 * a0 + b0 * b0) / 2));
+        check(noise < -80, "rest: noise and aliasing on a -6 dBFS 1 kHz tone (dB)", noise);
+        check(thd < -30 && thd > -60, "rest: warm stage harmonics on it (THD dB)", thd);
+        free(tl); free(tr);
+    }
 
     /* the output does not depend on the block size */
     run(il, ir, l, r, N, 0.7f, 0.3f, 0.6f, 0.5f, 256);
@@ -246,16 +289,19 @@ int main(int argc, char **argv)
 
     /* ---- 1: dub ---- */
     double tilt0, tilt1, rms0, rms1;
+    g_no_dust = 1;
     run(il, ir, l, r, N, 0, 0.5f, 0, 0, 256);
-    tilt0 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 5000, 15000);
+    tilt0 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
     rms0 = rms_db(l, W, N);
     run(il, ir, l, r, N, 0.5f, 0.5f, 0, 0, 256);
     wav_write(dir, "dub_050.wav", l, r, N);
     run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
     wav_write(dir, "dub_100.wav", l, r, N);
-    tilt1 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 5000, 15000);
+    tilt1 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
+    g_no_dust = 0;
+    run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
     rms1 = rms_db(l, W, N);
-    check(tilt1 - tilt0 > 10, "dub: bass over treble, full vs off (dB)", tilt1 - tilt0);
+    check(tilt1 - tilt0 > 8, "dub: bass over treble, full vs off (dB)", tilt1 - tilt0);
     check(fabs(rms1 - rms0) < 2, "dub: loudness change, full vs off (dB)", rms1 - rms0);
     {
         double c0, c1, p0 = 0, p1 = 0;
@@ -298,11 +344,11 @@ int main(int argc, char **argv)
 
     /* ---- 2: filter ---- */
     {
-        double lo0 = band_db(il, W, N, 40, 150), hi0 = band_db(il, W, N, 5000, 15000);
+        double lo0 = band_db(il, W, N, 40, 150), hi0 = band_db(il, W, N, 3000, 9000);
         run(il, ir, l, r, N, 0, 0.0f, 0, 0, 256);
         check(lo0 - band_db(l, W, N, 40, 150) > 30, "filter down: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
         run(il, ir, l, r, N, 0, 1.0f, 0, 0, 256);
-        check(hi0 - band_db(l, W, N, 5000, 15000) > 30, "filter up: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 5000, 15000));
+        check(hi0 - band_db(l, W, N, 3000, 9000) > 30, "filter up: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
         /* a slow sweep from bottom to top, for listening */
         fx_init(&E, SR);
         memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
@@ -320,7 +366,7 @@ int main(int argc, char **argv)
             zl[SR / 2] = zr[SR / 2] = 0.5f;
             run(zl, zr, l, r, N, 0, 0.5f, pos[k], 0, 256);
             /* RT60 from the energy decay between -5 and -25 dB (Schroeder integral) */
-            int st = SR / 2 + lat + 2; /* skip the dry impulse */
+            int st = SR / 2 + lat + SR / 20; /* skip the dry impulse and the filters' ring */
             double tot = 0; for (int i = st; i < N; i++) tot += (double)l[i] * l[i] + (double)r[i] * r[i];
             double acc = tot; int t5 = -1, t25 = -1;
             for (int i = st; i < N; i++) {

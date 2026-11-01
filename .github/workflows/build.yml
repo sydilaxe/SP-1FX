@@ -1,0 +1,51 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Effects engine (host tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: renders
+          path: build/test/*.wav
+
+  firmware:
+    name: Firmware (sp1fx.bin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sp-1fx
+      - name: Zephyr SDK 0.17.4 (arm only)
+        run: |
+          cd $HOME
+          curl -sSL -o sdk.tar.xz https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.4/zephyr-sdk-0.17.4_linux-x86_64_minimal.tar.xz
+          tar xf sdk.tar.xz && rm sdk.tar.xz
+          curl -sSL -o arm.tar.xz https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v0.17.4/toolchain_linux-x86_64_arm-zephyr-eabi.tar.xz
+          tar xf arm.tar.xz -C zephyr-sdk-0.17.4 && rm arm.tar.xz
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4" >> $GITHUB_ENV
+      - name: Zephyr v4.3.1
+        run: |
+          pip install west
+          git clone --depth 1 --branch v4.3.1 https://github.com/zephyrproject-rtos/zephyr ws/zephyr
+          cd ws && west init -l zephyr
+          west config manifest.project-filter -- '-.*,+hal_nordic,+cmsis_6,+cmsis'
+          west update --narrow -o=--depth=1
+          pip install -r zephyr/scripts/requirements-base.txt
+          echo "ZEPHYR_BASE=$GITHUB_WORKSPACE/ws/zephyr" >> $GITHUB_ENV
+      - name: Build
+        run: cd ws && ../sp-1fx/scripts/build-firmware.sh
+      - name: CPU estimate (Cortex-M4, worst case)
+        run: pip install unicorn capstone && python3 sp-1fx/tools/bench_m4.py -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sp1fx-firmware
+          path: sp-1fx/sp1fx.bin

@@ -3,7 +3,7 @@
 #   make firmware   sp1fx.bin (needs ZEPHYR_BASE and the Zephyr SDK; see README)
 #   make bench      Cortex-M4 cycle estimate for the effects (needs the SDK and unicorn)
 CC ?= cc
-CFLAGS := -O2 -std=gnu11 -Wall -Wextra -fno-math-errno
+CFLAGS := -O2 -std=gnu11 -Wall -Wextra -fno-math-errno -ffp-contract=off
 
 test: build/fx_test
 	mkdir -p build/test

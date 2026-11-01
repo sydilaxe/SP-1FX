@@ -2,7 +2,7 @@
 """Estimate Cortex-M4 cycles per 128-frame block for the SP-1FX effects.
 
 Builds tools/bench_m4.c with the Zephyr SDK's arm-zephyr-eabi-gcc (as the firmware does: -O2,
-Cortex-M4F hard float), runs it in Unicorn, and weights each executed instruction with its M4
+-ffp-contract=off, Cortex-M4F hard float), runs it in Unicorn, and weights each executed instruction with its M4
 cycle count (ARM Cortex-M4 TRM, FPU timing: VDIV/VSQRT 14, VMLA/VFMA 3, loads 2, taken branch 3).
 Wait states: the nRF52840 runs code from flash with the cache on; this assumes cache hits.
 
@@ -15,13 +15,13 @@ import capstone
 
 here = os.path.dirname(os.path.abspath(__file__))
 root = os.path.dirname(here)
-args = [a for a in sys.argv[1:] if a != "-v"]
+args = [a for a in sys.argv[1:] if not a.startswith("-v")]
 gcc = args[0] if args else os.path.join(
     os.environ.get("ZEPHYR_SDK_INSTALL_DIR", ""), "arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc")
 tmp = tempfile.mkdtemp()
 elf = os.path.join(tmp, "bench.elf")
 subprocess.check_call([gcc, "-mcpu=cortex-m4", "-mthumb", "-mfloat-abi=hard", "-mfpu=fpv4-sp-d16",
-                       "-O2", "-fno-math-errno", "-DFX_PROFILE", "-ffreestanding", "-nostdlib", "-Wl,-e,bench_block",
+                       "-O2", "-fno-math-errno", "-ffp-contract=off", "-DFX_PROFILE", "-ffreestanding", "-nostdlib", "-Wl,-e,bench_block",
                        "-Wl,-Ttext=0x10000", "-Wl,-Tdata=0x20000000", "-I", os.path.join(root, "fx"),
                        os.path.join(here, "bench_m4.c"), os.path.join(root, "fx", "fx.c"), "-lgcc", "-o", elf])
 objcopy = gcc.replace("gcc", "objcopy")
@@ -50,7 +50,7 @@ counts = collections.Counter()
 def cost(ins):
     m = ins.mnemonic.split(".")[0]
     if m in ("vdiv", "vsqrt"): return 14
-    if m in ("vmla", "vmls", "vfma", "vfms", "vnmla", "vnmls"): return 3
+    if m in ("vmla", "vmls", "vfma", "vfms", "vnmla", "vnmls", "vfnma", "vfnms"): return 3
     if m in ("vldr", "vstr", "vmov", "vcvt"): return 1 if m == "vcvt" else (2 if m != "vmov" else 1)
     if m in ("vpush", "vpop", "vldm", "vstm", "push", "pop", "ldm", "stm", "ldmia", "stmia", "stmdb"):
         return 1 + max(1, ins.op_str.count(",") + 1)
@@ -62,6 +62,7 @@ def cost(ins):
 last = [None]
 on = [False]
 fn = collections.Counter()
+hot = collections.Counter()
 funcs = sorted((a, n) for n, a in syms.items() if 0x10000 <= a < 0x20000000)
 import bisect
 fstarts = [a for a, _ in funcs]
@@ -81,6 +82,7 @@ def hook(uc, addr, size, _):
     counts["ins"] += 1
     counts["cyc"] += c[0]
     fn[func_of(addr)] += c[0]
+    hot[addr] += c[0]
     # a taken branch: this instruction does not follow the last one
     if last[0] is not None and addr != last[0][0] + last[0][1]:
         counts["cyc"] += 1
@@ -106,7 +108,13 @@ cyc = counts["cyc"] / N
 us = cyc / 64.0
 print(f"instructions per block: {counts['ins'] / N:.0f}")
 print(f"estimated cycles per 128-frame block: {cyc:.0f} = {us:.0f} us at 64 MHz")
-if "-v" in sys.argv:
+if "-v" in sys.argv or "-vv" in sys.argv:
     for name, c in fn.most_common(12):
         print(f"  {name:28s} {c / N / 128:8.0f} cycles/frame")
+if "-vv" in sys.argv:
+    rows = sorted(hot.items())
+    for a, c in rows:
+        if c / N / 128 >= float(os.environ.get("HOT_MIN", "1.5")):
+            ins = next(md.disasm(bytes(uc.mem_read(a, 4)), a))
+            print(f"  {func_of(a)[:14]:14s} {a:08x} {c / N / 128:6.1f}  {ins.mnemonic} {ins.op_str}")
 print(f"block budget 2667 us: {100 * us / 2667:.0f}% of one core")

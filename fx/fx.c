@@ -60,6 +60,7 @@ static void dub_init(fx_dub *d, float sr)
     d->att = sample_coef(0.010f, sr);   /* slow attack lets the transient through: the punch */
     d->rel = sample_coef(0.120f, sr);
     d->knee = 6.0f;
+    d->sc_c = sample_coef(1.0f / (2.0f * FX_PI * 150.0f), sr);
     d->dc_r = 1.0f - 2.0f * FX_PI * 4.0f / sr;
     d->hiss_c = sample_coef(1.0f / (2.0f * FX_PI * 5000.0f), sr);
     d->tick_dec = fx_exp2f(-1.44269504f / (0.00015f * sr));
@@ -76,54 +77,43 @@ STAGE static void dub_control(fx_dub *d, float pos, float sr)
     float a = d->amt;
 
     /* EQ: the low end of a dub mix, a de-mudded low-mid, a forward mid, a dark top */
-    fx_svf_highpass(&d->hp, 22.0f + 18.0f * a, 0.7f, sr);
-    fx_svf_lowshelf(&d->shelf, 95.0f, 0.71f, 8.0f * a, sr);
+    d->hp_c = 2.0f * FX_PI * (22.0f + 18.0f * a) / sr;
+    fx_svf_lowshelf(&d->shelf, 95.0f, 0.71f, 10.0f * a, sr);
     fx_svf_bell(&d->cut, 320.0f, 0.9f, -4.0f * a, sr);
     fx_svf_bell(&d->pres, 1500.0f, 0.8f, 3.0f * a, sr);
-    fx_svf_lowpass(&d->lp, 20000.0f * fx_exp2f(-1.62f * a), 0.62f, sr); /* 20k -> 6.5k */
+    fx_svf_lowpass(&d->lp, 11000.0f * fx_exp2f(-1.46f * a), 0.62f, sr); /* 11k -> 4k */
 
     /* punch: stereo bus compressor, slow attack, threshold and ratio rise with the fader */
-    d->thr = -6.0f - 12.0f * a;
-    d->slope = 1.0f / (1.0f + 3.0f * a) - 1.0f;
+    d->thr = -8.0f - 8.0f * a;
+    d->slope = 1.0f / (1.0f + 2.0f * a) - 1.0f;
     d->makeup = -d->slope * (-d->thr) * 0.45f;
 
     /* tape saturation, slightly asymmetric for even harmonics */
-    d->drive = 1.0f + 2.5f * a;
+    d->drive = 1.0f + 1.5f * a;
     d->sat_mix = fx_clampf(4.0f * a, 0.0f, 1.0f);
     d->bias = 0.12f * a;
     d->bias_out = fx_softclip(d->bias);
     d->inv_drive = 1.0f / d->drive;
 
     /* tape wow and flutter */
-    d->wow_depth = 9.0f * a;
-    d->flt_depth = 1.2f * a;
+    d->wow_depth = 9.0f * a * sr / 48000.0f;   /* 0.19 ms */
+    d->flt_depth = 1.2f * a * sr / 48000.0f;
 
     /* dust comes in late on the fader */
     float s = a * fx_sqrtf(a);
-    d->hiss = s * fx_db2lin(-42.0f);
+    d->hiss = s * fx_db2lin(-36.0f);
     d->tick_p = (1.5f + 16.0f * s) / sr * (a > 0.0f);
     d->tick_th = (uint32_t)(d->tick_p * 4294967040.0f);
-    d->tick_amp = 0.10f * s;
+    d->tick_amp = 0.20f * s;
     d->pop_p = 0.7f * s / sr;
-    d->pop_amp = 0.35f * s;
+    d->pop_amp = 0.70f * s;
 
-    d->trim = fx_db2lin(-5.5f * a);
+    d->trim = fx_db2lin(-9.0f * a);
 
     osc_norm(&d->wow_c, &d->wow_s);
     osc_norm(&d->flt_c, &d->flt_s);
 }
 
-static inline float hermite(const float *b, float idx)
-{
-    int i = (int)idx;
-    float f = idx - (float)i;
-    float ym1 = b[(i - 1) & (DUB_DL - 1)], y0 = b[i & (DUB_DL - 1)];
-    float y1 = b[(i + 1) & (DUB_DL - 1)], y2 = b[(i + 2) & (DUB_DL - 1)];
-    float c1 = 0.5f * (y1 - ym1);
-    float c2 = ym1 - 2.5f * y0 + 2.0f * y1 - 0.5f * y2;
-    float c3 = 0.5f * (y2 - ym1) + 1.5f * (y0 - y1);
-    return ((c3 * f + c2) * f + c1) * f + y0;
-}
 
 STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
 {
@@ -147,8 +137,11 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             t = fc * frc - fs * frs; fs = fs * frc + fc * frs; fc = t;
             if (!wet_off) {
                 float idx = (float)(wpos + DUB_DL) - ((float)DUB_CENTER + wd * ws + fd * fs);
-                x[0][i] = hermite(b0, idx);
-                x[1][i] = hermite(b1, idx);
+                int i0 = (int)idx;
+                float fr = idx - (float)i0;
+                int k0 = i0 & (DUB_DL - 1), k1 = (i0 + 1) & (DUB_DL - 1);
+                x[0][i] = b0[k0] + fr * (b0[k1] - b0[k0]);
+                x[1][i] = b1[k0] + fr * (b1[k1] - b1[k0]);
             }
             wpos = (wpos + 1) & (DUB_DL - 1);
         }
@@ -163,17 +156,19 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
     /* 2: the EQ, one channel at a time so the filter states stay in registers */
     for (int c = 0; c < 2; c++) {
         fx_svf_state *st = d->st[c];
-        float h1 = st[0].ic1, h2 = st[0].ic2, s1 = st[1].ic1, s2 = st[1].ic2;
+        float hz = st[0].ic1, s1 = st[1].ic1, s2 = st[1].ic2;
         float c1 = st[2].ic1, c2 = st[2].ic2, p1 = st[3].ic1, p2 = st[3].ic2;
-        const fx_svf H = d->hp, S = d->shelf, C = d->cut, P = d->pres;
+        const fx_svf S = d->shelf, C = d->cut, P = d->pres;
+        const float hc = d->hp_c;
         float *v = x[c];
         for (int i = 0; i < n; i++) {
-            float y = fx_svf_tick(H.a1, H.a2, H.a3, H.m0, H.m1, H.m2, &h1, &h2, v[i]);
+            hz += hc * (v[i] - hz);          /* rumble: a one-pole high-pass */
+            float y = v[i] - hz;
             y = fx_svf_tick(S.a1, S.a2, S.a3, S.m0, S.m1, S.m2, &s1, &s2, y);
             y = fx_svf_tick(C.a1, C.a2, C.a3, C.m0, C.m1, C.m2, &c1, &c2, y);
             v[i] = fx_svf_tick(P.a1, P.a2, P.a3, P.m0, P.m1, P.m2, &p1, &p2, y);
         }
-        st[0].ic1 = h1; st[0].ic2 = h2; st[1].ic1 = s1; st[1].ic2 = s2;
+        st[0].ic1 = hz; st[1].ic1 = s1; st[1].ic2 = s2;
         st[2].ic1 = c1; st[2].ic2 = c2; st[3].ic1 = p1; st[3].ic2 = p2;
     }
 
@@ -189,8 +184,13 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
         const float pp = d->pop_p, pa = d->pop_amp, pd = d->pop_dec, pc = d->pop_c;
         const int dust = d->dust_on;
         int ph = d->cphase;
+        float sl0 = d->sc_lp[0], sl1 = d->sc_lp[1];
+        const float scc = d->sc_c;
         for (int i = 0; i < n; i++) {
-            float a0 = fx_absf(x[0][i]), a1 = fx_absf(x[1][i]);
+            /* the detector hears the signal above 150 Hz: the bass stays big, the kick doesn't
+             * pump the mix */
+            sl0 += scc * (x[0][i] - sl0); sl1 += scc * (x[1][i] - sl1);
+            float a0 = fx_absf(x[0][i] - sl0), a1 = fx_absf(x[1][i] - sl1);
             float pk = a0 > a1 ? a0 : a1;
             env += (pk - env) * (pk > env ? att : rel);
             if (ph == 0) {
@@ -210,12 +210,21 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             }
             pop[i] = pl;
         }
+        d->sc_lp[0] = sl0; d->sc_lp[1] = sl1;
         d->env = env; d->gain = g; d->rng = rng; d->cphase = ph; d->dg = dg; d->pop_env = pe; d->pop_lp = pl;
     }
 
     /* 4: tape saturation, the record's hiss and ticks, the dark top, the DC blocker, then the
      *    fade between dry and wet */
-    float gate0 = d->gate;
+    float gates[FX_CHUNK];
+    {
+        float g = d->gate, gt = d->gate_target, gstep = 1.0f / (0.02f * sr);
+        for (int i = 0; i < n; i++) {
+            if (g != gt) { g += g < gt ? gstep : -gstep; g = fx_clampf(g, 0.0f, 1.0f); }
+            gates[i] = g;
+        }
+        d->gate = g;
+    }
     for (int c = 0; c < 2; c++) {
         float *out = c ? r : l;
         float *v = x[c];
@@ -228,7 +237,6 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
         float lp1 = d->st[c][4].ic1, lp2 = d->st[c][4].ic2;
         float hl = d->hiss_lp[c], te = d->tick_env[c], dx = d->dc_x[c], dy = d->dc_y[c];
         uint32_t rng = d->rng_c[c];
-        float gate = gate0, gt = d->gate_target, gstep = 1.0f / (0.02f * sr);
         for (int i = 0; i < n; i++) {
             float y = v[i] * gain[i];
             float t = (fx_softclip(y * drive + bias) - bout) * idr;
@@ -247,16 +255,11 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             float o = y - dx + dcr * dy;
             dx = y; dy = o;
             o *= trim;
-            if (gate != gt) {
-                gate += gate < gt ? gstep : -gstep;
-                gate = fx_clampf(gate, 0.0f, 1.0f);
-            }
-            out[i] = dry[c][i] + gate * (o - dry[c][i]);
+            out[i] = dry[c][i] + gates[i] * (o - dry[c][i]);
         }
         d->st[c][4].ic1 = lp1; d->st[c][4].ic2 = lp2;
         d->hiss_lp[c] = hl; d->tick_env[c] = te; d->dc_x[c] = dx; d->dc_y[c] = dy;
         d->rng_c[c] = rng;
-        if (c == 1) d->gate = gate;
     }
 
     if (d->gate == 0.0f && d->gate_target == 0.0f) {
@@ -266,6 +269,7 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             d->dc_x[c] = d->dc_y[c] = d->hiss_lp[c] = d->tick_env[c] = 0.0f;
         }
         d->env = d->pop_env = d->pop_lp = 0.0f;
+        d->sc_lp[0] = d->sc_lp[1] = 0.0f;
         d->gain = 1.0f;
     }
 }
@@ -298,8 +302,8 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
         float hz = 20.0f * fx_exp2f(8.23f * t);
         fx_svf_highpass(&f->s1, hz, 0.5412f, sr);
         fx_svf_highpass(&f->s2, hz, q2, sr);
-    } else {                      /* low-pass: 20 kHz down to 60 Hz */
-        float hz = 20000.0f * fx_exp2f(-8.38f * t);
+    } else {                      /* low-pass: 11 kHz down to 60 Hz */
+        float hz = 11000.0f * fx_exp2f(-7.52f * t);
         fx_svf_lowpass(&f->s1, hz, 0.5412f, sr);
         fx_svf_lowpass(&f->s2, hz, q2, sr);
     }
@@ -340,7 +344,7 @@ static void reverb_init(fx_reverb *v, float sr)
 {
     __builtin_memset(v, 0, sizeof *v); /* in place: a zeroed literal would put 50 KB on the stack */
     v->sr = sr;
-    float rs = 0.5f * sr, k = rs / 24000.0f;
+    float rs = sr, k = rs / 24000.0f;
     for (int j = 0; j < REV_LINES; j++) {
         int len = (int)((float)rev_len24[j] * k);
         v->len[j] = len < REV_MAX - 16 ? len : REV_MAX - 16;
@@ -362,7 +366,7 @@ static void reverb_init(fx_reverb *v, float sr)
 
 STAGE static void reverb_control(fx_reverb *v, float pos)
 {
-    float sr = v->sr, rs = 0.5f * sr;
+    float sr = v->sr, rs = sr;
     float target = pos < REV_DEAD ? 0.0f : (pos - REV_DEAD) / (1.0f - REV_DEAD);
     v->amt += (target - v->amt) * chunk_coef(0.03f, sr);
     if (fx_absf(target - v->amt) < 1e-5f) v->amt = target;
@@ -382,92 +386,107 @@ STAGE static void reverb_control(fx_reverb *v, float pos)
     osc_norm(&v->lfo2_c, &v->lfo2_s);
 }
 
-/* one step of the tank at 24 kHz; returns the wet pair */
-static inline void reverb_tick(fx_reverb *v, float in, float *wl, float *wr)
+/* Tank steps at 24 kHz for a run of inputs. The line memory is written every step, so
+ * everything else lives in locals for the run (a float store could alias a struct field). */
+static void reverb_run(fx_reverb *v, const float *in_, float *wl_, float *wr_, int nt)
 {
-    /* pre-delay */
-    v->pre[v->pre_w] = in;
-    int pr = v->pre_w - v->pre_len;
-    in = v->pre[pr < 0 ? pr + REV_PRE : pr];
-    v->pre_w = v->pre_w + 1 < REV_PRE ? v->pre_w + 1 : 0;
+    float z[REV_LINES], gn[REV_LINES];
+    int len[REV_LINES];
+    for (int j = 0; j < REV_LINES; j++) { z[j] = v->damp_z[j]; gn[j] = v->gain[j]; len[j] = v->len[j] + 4; }
+    const float damp = v->damp, md = v->mod_depth;
+    float c1 = v->lfo1_c, s1 = v->lfo1_s, c2 = v->lfo2_c, s2 = v->lfo2_s;
+    const float rc1 = v->lfo1_rc, rs1 = v->lfo1_rs, rc2 = v->lfo2_rc, rs2 = v->lfo2_rs;
+    int wp = v->wp, pw = v->pre_w;
+    const int plen = v->pre_len;
+    int ap[REV_AP], apl[REV_AP];
+    for (int j = 0; j < REV_AP; j++) { ap[j] = v->ap_pos[j]; apl[j] = v->ap_len[j]; }
+    float (*line)[REV_MAX] = v->line;
+    float *pre = v->pre;
 
-    /* diffusion: four short allpasses smear the attack */
-    for (int j = 0; j < REV_AP; j++) {
-        float *b = v->ap[j];
-        int p = v->ap_pos[j];
-        float bd = b[p];
-        float y = bd - 0.62f * in;
-        b[p] = in + 0.62f * y;
-        v->ap_pos[j] = p + 1 < v->ap_len[j] ? p + 1 : 0;
-        in = y;
+    for (int t = 0; t < nt; t++) {
+        float in = in_[t];
+        /* pre-delay */
+        pre[pw] = in;
+        int pr = pw - plen;
+        in = pre[pr < 0 ? pr + REV_PRE : pr];
+        pw = pw + 1 < REV_PRE ? pw + 1 : 0;
+
+        /* diffusion: four short allpasses smear the attack */
+#pragma GCC unroll 4
+        for (int j = 0; j < REV_AP; j++) {
+            float *b = v->ap[j];
+            float bd = b[ap[j]];
+            float y = bd - 0.62f * in;
+            b[ap[j]] = in + 0.62f * y;
+            ap[j] = ap[j] + 1 < apl[j] ? ap[j] + 1 : 0;
+            in = y;
+        }
+
+        float u = c1 * rc1 - s1 * rs1; s1 = s1 * rc1 + c1 * rs1; c1 = u;
+        u = c2 * rc2 - s2 * rs2; s2 = s2 * rc2 + c2 * rs2; c2 = u;
+        const float m[4] = { md * s1, md * c1, -md * s2, -md * c2 };
+
+        float y[REV_LINES];
+        /* lines 0-3 move with the LFOs (read len + 4 + mod behind the write point, mod within
+         * +-3: never the write slot); lines 4-7 sit still: cheaper, and a steady core */
+#pragma GCC unroll 4
+        for (int j = 0; j < 4; j++) {
+            float dly = (float)len[j] + m[j];
+            int di = (int)dly;
+            float fr = dly - (float)di;
+            int a0 = wp - di;
+            if (a0 < 0) a0 += REV_MAX;
+            int a1 = a0 == 0 ? REV_MAX - 1 : a0 - 1;   /* one older */
+            float sm = line[j][a0] + fr * (line[j][a1] - line[j][a0]);
+            z[j] += damp * (sm - z[j]);
+            y[j] = z[j] * gn[j];
+        }
+#pragma GCC unroll 4
+        for (int j = 4; j < REV_LINES; j++) {
+            int a0 = wp - len[j];
+            if (a0 < 0) a0 += REV_MAX;
+            z[j] += damp * (line[j][a0] - z[j]);
+            y[j] = z[j] * gn[j];
+        }
+
+        /* 8x8 Hadamard, scaled to stay lossless */
+        float h0 = y[0] + y[1], h1 = y[0] - y[1], h2 = y[2] + y[3], h3 = y[2] - y[3];
+        float h4 = y[4] + y[5], h5 = y[4] - y[5], h6 = y[6] + y[7], h7 = y[6] - y[7];
+        float g0 = h0 + h2, g2 = h0 - h2, g1 = h1 + h3, g3 = h1 - h3;
+        float g4 = h4 + h6, g6 = h4 - h6, g5 = h5 + h7, g7 = h5 - h7;
+        const float hs = 0.35355339f, ii = 0.5f * in;
+        line[0][wp] = (g0 + g4) * hs + ii; line[1][wp] = (g1 + g5) * hs - ii;
+        line[2][wp] = (g2 + g6) * hs + ii; line[3][wp] = (g3 + g7) * hs - ii;
+        line[4][wp] = (g0 - g4) * hs + ii; line[5][wp] = (g1 - g5) * hs - ii;
+        line[6][wp] = (g2 - g6) * hs + ii; line[7][wp] = (g3 - g7) * hs - ii;
+        wp = wp + 1 < REV_MAX ? wp + 1 : 0;
+
+        wl_[t] = (y[0] - y[2] + y[4] - y[6] + 0.5f * (y[1] + y[7])) * 0.6f;
+        wr_[t] = (y[1] - y[3] + y[5] - y[7] + 0.5f * (y[0] - y[6])) * 0.6f;
     }
 
-    float t = v->lfo1_c * v->lfo1_rc - v->lfo1_s * v->lfo1_rs;
-    v->lfo1_s = v->lfo1_s * v->lfo1_rc + v->lfo1_c * v->lfo1_rs; v->lfo1_c = t;
-    t = v->lfo2_c * v->lfo2_rc - v->lfo2_s * v->lfo2_rs;
-    v->lfo2_s = v->lfo2_s * v->lfo2_rc + v->lfo2_c * v->lfo2_rs; v->lfo2_c = t;
-    const float md = v->mod_depth;
-    const float m[4] = { md * v->lfo1_s, md * v->lfo1_c, md * v->lfo2_s, md * v->lfo2_c };
-    const float damp = v->damp;
-
-    float y[REV_LINES];
-    for (int j = 0; j < REV_LINES; j++) {
-        /* read len + 4 + mod behind the write point (mod within +-3: never the write slot) */
-        float dly = (float)(v->len[j] + 4) + (j & 4 ? -m[j & 3] : m[j & 3]);
-        int di = (int)dly;
-        float fr = dly - (float)di;
-        int a0 = v->wp[j] - di;
-        if (a0 < 0) a0 += REV_MAX;
-        int a1 = a0 - 1 < 0 ? REV_MAX - 1 : a0 - 1;   /* one older */
-        const float *b = v->line[j];
-        float s = b[a0] + fr * (b[a1] - b[a0]);
-        float z = v->damp_z[j] + damp * (s - v->damp_z[j]);
-        v->damp_z[j] = z;
-        y[j] = z * v->gain[j];
-    }
-
-    /* 8x8 Hadamard, scaled to stay lossless */
-    float h0 = y[0] + y[1], h1 = y[0] - y[1], h2 = y[2] + y[3], h3 = y[2] - y[3];
-    float h4 = y[4] + y[5], h5 = y[4] - y[5], h6 = y[6] + y[7], h7 = y[6] - y[7];
-    float g0 = h0 + h2, g2 = h0 - h2, g1 = h1 + h3, g3 = h1 - h3;
-    float g4 = h4 + h6, g6 = h4 - h6, g5 = h5 + h7, g7 = h5 - h7;
-    const float hs = 0.35355339f, ii = 0.5f * in;
-    float o[REV_LINES] = { (g0 + g4) * hs + ii, (g1 + g5) * hs - ii, (g2 + g6) * hs + ii, (g3 + g7) * hs - ii,
-                           (g0 - g4) * hs + ii, (g1 - g5) * hs - ii, (g2 - g6) * hs + ii, (g3 - g7) * hs - ii };
-    for (int j = 0; j < REV_LINES; j++) {
-        v->line[j][v->wp[j]] = o[j];
-        v->wp[j] = v->wp[j] + 1 < REV_MAX ? v->wp[j] + 1 : 0;
-    }
-
-    *wl = (y[0] - y[2] + y[4] - y[6] + 0.5f * (y[1] + y[7])) * 0.6f;
-    *wr = (y[1] - y[3] + y[5] - y[7] + 0.5f * (y[0] - y[6])) * 0.6f;
+    for (int j = 0; j < REV_LINES; j++) v->damp_z[j] = z[j];
+    for (int j = 0; j < REV_AP; j++) v->ap_pos[j] = ap[j];
+    v->lfo1_c = c1; v->lfo1_s = s1; v->lfo2_c = c2; v->lfo2_s = s2;
+    v->wp = wp; v->pre_w = pw;
 }
 
 STAGE static void reverb_process(fx_reverb *v, float *l, float *r, int n)
 {
     if (!v->live) return; /* asleep: dry passes untouched */
     const float wet = v->wet, hpc = v->in_hpc, lpc = v->in_lpc;
+    float tin[FX_CHUNK], twl[FX_CHUNK], twr[FX_CHUNK];
+    float lp = v->in_lp, hp = v->in_hp;
+    /* the send: mono, band-limited */
     for (int i = 0; i < n; i++) {
-        /* the send: mono, band-limited, at 48 kHz */
         float in = 0.5f * (l[i] + r[i]);
-        v->in_lp += lpc * (in - v->in_lp);
-        v->in_hp += hpc * (v->in_lp - v->in_hp);
-        in = v->in_lp - v->in_hp;
-        /* every second frame, one tank step on the pair's average; the 48 kHz output glides
-         * between the last two steps (one 24 kHz sample late) */
-        float ol, orr;
-        if (!v->half) {
-            v->half_in = in;
-            ol = v->wl1; orr = v->wr1;
-        } else {
-            v->wl0 = v->wl1; v->wr0 = v->wr1;
-            reverb_tick(v, 0.5f * (v->half_in + in), &v->wl1, &v->wr1);
-            ol = 0.5f * (v->wl0 + v->wl1); orr = 0.5f * (v->wr0 + v->wr1);
-        }
-        v->half ^= 1;
-        l[i] += wet * ol;
-        r[i] += wet * orr;
+        lp += lpc * (in - lp);
+        hp += hpc * (lp - hp);
+        tin[i] = lp - hp;
     }
+    v->in_lp = lp; v->in_hp = hp;
+    reverb_run(v, tin, twl, twr, n);
+    for (int i = 0; i < n; i++) { l[i] += wet * twl[i]; r[i] += wet * twr[i]; }
 }
 
 /* ============================================================== 4: limiter ==== */
@@ -475,7 +494,7 @@ STAGE static void reverb_process(fx_reverb *v, float *l, float *r, int n)
 static void limiter_init(fx_limiter *m, float sr)
 {
     *m = (fx_limiter){0};
-    m->ceiling = fx_db2lin(-0.3f);
+    m->ceiling = fx_db2lin(-1.0f);   /* the half-band upsampler can add a little between samples */
     m->rel = sample_coef(0.080f, sr);
     m->drive = m->drive_target = 1.0f;
 }
@@ -493,63 +512,115 @@ STAGE static void limiter_control(fx_limiter *m, float pos)
 
 STAGE static void limiter_process(fx_limiter *m, float *l, float *r, int n)
 {
+    const float ceil = m->ceiling, rel = m->rel, inv_la = 1.0f / (float)LIM_LA;
+    float drive = m->drive, cur = m->cur, held = m->held, sum = m->box_sum, gr = m->gr;
+    float meter = m->meter;
+    int p = m->pos, sn = m->sn, si = m->si;
     for (int i = 0; i < n; i++) {
-        m->drive += m->dstep;
-        float xl = l[i] * m->drive, xr = r[i] * m->drive;
-        int p = m->pos;
+        drive += m->dstep;
+        float xl = l[i] * drive, xr = r[i] * drive;
 
         /* the reduction this frame needs to sit under the ceiling */
-        float pk = fx_absf(xl) > fx_absf(xr) ? fx_absf(xl) : fx_absf(xr);
-        float need = pk > m->ceiling ? 1.0f - m->ceiling / pk : 0.0f;
+        float al = fx_absf(xl), ar = fx_absf(xr);
+        float pk = al > ar ? al : ar;
+        float need = pk > ceil ? 1.0f - ceil / pk : 0.0f;
 
-        /* the most reduction any frame in the look-ahead window needs (monotonic queue) */
-        while (m->dq_n > 0 && m->red[m->dq[(m->dq_head + m->dq_n - 1) % LIM_LA]] <= need) m->dq_n--;
-        m->red[p] = need;
-        m->dq[(m->dq_head + m->dq_n) % LIM_LA] = p;
-        m->dq_n++;
-        float hold = m->red[m->dq[m->dq_head]];
+        /* peak hold over the look-ahead window and up to one segment more: never less than
+         * any frame in the window needs */
+        if (need > cur) cur = need;
+        float hold = cur > held ? cur : held;
+        if (++sn == LIM_SEG) {
+            sn = 0;
+            m->seg[si] = cur;
+            si = si + 1 < LIM_NSEG ? si + 1 : 0;
+            cur = 0.0f;
+            /* the finished segments still inside the window (the oldest one leaves) */
+            float h = 0.0f;
+            for (int k = 0; k < LIM_NSEG; k++) if (k != si && m->seg[k] > h) h = m->seg[k];
+            held = h;
+        }
 
         /* box filter of the held reduction over the window: smooth, and there in time */
-        m->box_sum += hold - m->box[p];
+        sum += hold - m->box[p];
         m->box[p] = hold;
-        float box = m->box_sum * (1.0f / (float)LIM_LA);
+        float box = sum * inv_la;
         if (box < 1e-7f) box = 0.0f;
 
-        if (box > m->gr) m->gr = box;
-        else m->gr += m->rel * (box - m->gr);
-        if (m->gr > m->meter) m->meter = m->gr;
+        if (box > gr) gr = box;
+        else gr += rel * (box - gr);
+        if (gr > meter) meter = gr;
 
         /* the delayed frame out, LIM_LA - 1 frames later */
-        int q = (p + 1) % LIM_LA;
-        float g = 1.0f - m->gr;
-        float ol = m->dl[0][q], orr = m->dl[1][q];
+        int q = p + 1 < LIM_LA ? p + 1 : 0;
+        float g = 1.0f - gr;
+        float ol = m->dl[0][q] * g, orr = m->dl[1][q] * g;
         m->dl[0][p] = xl; m->dl[1][p] = xr;
-        ol *= g; orr *= g;
         /* last guard against rounding: never past the ceiling */
-        l[i] = fx_clampf(ol, -m->ceiling, m->ceiling);
-        r[i] = fx_clampf(orr, -m->ceiling, m->ceiling);
-
-        m->pos = q;
-        /* expire the queue head when it falls out of the window (it is the slot written next) */
-        if (m->dq_n > 0 && m->dq[m->dq_head] == q) { m->dq_head = (m->dq_head + 1) % LIM_LA; m->dq_n--; }
+        l[i] = fx_clampf(ol, -ceil, ceil);
+        r[i] = fx_clampf(orr, -ceil, ceil);
+        p = q;
     }
+    m->drive = drive; m->cur = cur; m->held = held; m->box_sum = sum; m->gr = gr;
+    m->meter = meter; m->pos = p; m->sn = sn; m->si = si;
 }
 
 /* ================================================================ engine ==== */
 
+/* Polyphase IIR half-band (two paths of five first-order allpasses in z^2; the design of Laurent
+ * de Soras' HIIR): 10 coefficients, transition 0.06. Flat to 11 kHz at 48 kHz, -3 dB at 12 kHz,
+ * -72 dB at 13 kHz, below -140 dB from 14 kHz. */
+static const float hb_c[HB_C] = {
+    0.0212186694f, 0.0816374655f, 0.1726362110f, 0.2829113996f, 0.4014960495f,
+    0.5199743642f, 0.6334772202f, 0.7406996488f, 0.8434655794f, 0.9463427912f,
+};
+
+/* Runs n pairs through both paths, the state in registers: path A (even coefficients) takes a[],
+ * path B (odd) takes b[]; their outputs replace the inputs. A section's previous input is the
+ * previous output of the section before it, so the state is each section's last output (y) and
+ * the two path inputs (x0, x1). */
+static void hb_run(float *a, float *b, int n, float *y, float *x0, float *x1)
+{
+    const float c0 = hb_c[0], c1 = hb_c[1], c2 = hb_c[2], c3 = hb_c[3], c4 = hb_c[4];
+    const float c5 = hb_c[5], c6 = hb_c[6], c7 = hb_c[7], c8 = hb_c[8], c9 = hb_c[9];
+    float y0 = y[0], y1 = y[1], y2 = y[2], y3 = y[3], y4 = y[4];
+    float y5 = y[5], y6 = y[6], y7 = y[7], y8 = y[8], y9 = y[9];
+    float xa = *x0, xb = *x1;
+    for (int k = 0; k < n; k++) {
+        float s = a[k], t;
+        t = (s - y0) * c0 + xa; xa = s;  s = t;
+        t = (s - y2) * c2 + y0; y0 = s;  s = t;
+        t = (s - y4) * c4 + y2; y2 = s;  s = t;
+        t = (s - y6) * c6 + y4; y4 = s;  s = t;
+        t = (s - y8) * c8 + y6; y6 = s;  y8 = t;
+        a[k] = t;
+        s = b[k];
+        t = (s - y1) * c1 + xb; xb = s;  s = t;
+        t = (s - y3) * c3 + y1; y1 = s;  s = t;
+        t = (s - y5) * c5 + y3; y3 = s;  s = t;
+        t = (s - y7) * c7 + y5; y5 = s;  s = t;
+        t = (s - y9) * c9 + y7; y7 = s;  y9 = t;
+        b[k] = t;
+    }
+    y[0] = y0; y[1] = y1; y[2] = y2; y[3] = y3; y[4] = y4;
+    y[5] = y5; y[6] = y6; y[7] = y7; y[8] = y8; y[9] = y9;
+    *x0 = xa; *x1 = xb;
+}
+
+
 void fx_init(fx_engine *e, float sr)
 {
+    __builtin_memset(e, 0, sizeof *e);
     e->sr = sr;
-    e->phase = 0;
+    e->cr = 0.5f * sr;
     e->fader[FX_DUB] = 0.0f;
     e->fader[FX_FILTER] = 0.5f;
     e->fader[FX_REVERB] = 0.0f;
     e->fader[FX_LIMITER] = 0.0f;
-    dub_init(&e->dub, sr);
-    e->filter = (fx_filter){0};
+    e->warm_c = sample_coef(1.0f / (2.0f * FX_PI * 3500.0f), sr);
+    dub_init(&e->dub, e->cr);
     e->filter.pos = 0.5f;
-    reverb_init(&e->reverb, sr);
-    limiter_init(&e->limiter, sr);
+    reverb_init(&e->reverb, e->cr);
+    limiter_init(&e->limiter, e->cr);
 }
 
 void fx_set_fader(fx_engine *e, int slot, float pos)
@@ -560,25 +631,107 @@ void fx_set_fader(fx_engine *e, int slot, float pos)
 int fx_latency(const fx_engine *e)
 {
     (void)e;
-    return DUB_CENTER + LIM_LA - 1;
+    /* the two half-bands (their group delay through the mids: about 11 frames for the pair);
+     * in the core, the dub's tape centre and the limiter's look-ahead, at half rate */
+    return 11 + 2 * (DUB_CENTER + LIM_LA - 1);
 }
 
-void fx_process(fx_engine *e, float *l, float *r, int n)
+/* the effects, at the core rate, in chunks that line up with the parameter updates */
+static void core_process(fx_engine *e, float *l, float *r, int n)
 {
     while (n > 0) {
         if (e->phase == 0) {
-            dub_control(&e->dub, e->fader[FX_DUB], e->sr);
-            filter_control(&e->filter, e->fader[FX_FILTER], e->sr);
+            dub_control(&e->dub, e->fader[FX_DUB], e->cr);
+            filter_control(&e->filter, e->fader[FX_FILTER], e->cr);
             reverb_control(&e->reverb, e->fader[FX_REVERB]);
             limiter_control(&e->limiter, e->fader[FX_LIMITER]);
         }
         int m = FX_CHUNK - e->phase;
         if (m > n) m = n;
-        dub_process(&e->dub, l, r, m, e->sr);
-        filter_process(&e->filter, l, r, m, e->sr);
+        dub_process(&e->dub, l, r, m, e->cr);
+        filter_process(&e->filter, l, r, m, e->cr);
         reverb_process(&e->reverb, l, r, m);
         limiter_process(&e->limiter, l, r, m);
         e->phase = (e->phase + m) % FX_CHUNK;
+        l += m; r += m; n -= m;
+    }
+}
+
+/* up to 2 * FX_CHUNK outside frames */
+STAGE static void fx_piece(fx_engine *e, float *l, float *r, int n)
+{
+    float pa[2][FX_CHUNK + 1], pb[2][FX_CHUNK + 1];   /* each pair: newer, older */
+    int nc = 0;
+
+    /* the warm stage's treble dip, and the frames gathered in pairs */
+    {
+        const float wc = e->warm_c;
+        float w0 = e->warm_lp[0], w1 = e->warm_lp[1];
+        int odd = e->dodd;
+        for (int i = 0; i < n; i++) {
+            float x0 = l[i], x1 = r[i];
+            /* a slight treble dip: a quarter of the way to a 3.5 kHz low-pass */
+            w0 += wc * (x0 - w0); w1 += wc * (x1 - w1);
+            x0 += 0.25f * (w0 - x0); x1 += 0.25f * (w1 - x1);
+            if (odd) {
+                pa[0][nc] = x0; pb[0][nc] = e->dfirst[0];
+                pa[1][nc] = x1; pb[1][nc] = e->dfirst[1];
+                nc++;
+            } else {
+                e->dfirst[0] = x0; e->dfirst[1] = x1;
+            }
+            odd ^= 1;
+        }
+        e->warm_lp[0] = w0; e->warm_lp[1] = w1; e->dodd = odd;
+    }
+
+    /* 48 -> 24 kHz */
+    float cl[FX_CHUNK + 1], crr[FX_CHUNK + 1];
+    for (int c = 0; c < 2; c++) {
+        hb_run(pa[c], pb[c], nc, e->dy[c], &e->dx0[c], &e->dx1[c]);
+        float *o = c ? crr : cl;
+        /* and the warm stage's gentle tape saturation: half of a soft clip driven a little. Here,
+         * band-limited at 24 kHz, its harmonics stay clean: the ones that would fold back come
+         * from the top octave, which sits far below full scale in real music */
+        for (int k = 0; k < nc; k++) {
+            float x = 0.5f * (pa[c][k] + pb[c][k]);
+            o[k] = x + 0.5f * (fx_softclip(1.4f * x) * 0.71428571f - x);
+        }
+    }
+
+    core_process(e, cl, crr, nc);
+
+    /* 24 -> 48 kHz: each core frame makes a pair, the first half out with the odd outside frame
+     * that brought it, the second with the next */
+    for (int c = 0; c < 2; c++) {
+        const float *in = c ? crr : cl;
+        for (int k = 0; k < nc; k++) pa[c][k] = pb[c][k] = in[k];
+        hb_run(pa[c], pb[c], nc, e->uy[c], &e->ux0[c], &e->ux1[c]);
+    }
+    {
+        int odd = e->uodd, k = 0;
+        for (int i = 0; i < n; i++) {
+            float o0, o1;
+            if (odd) {
+                o0 = pa[0][k]; o1 = pa[1][k];
+                e->usecond[0] = pb[0][k]; e->usecond[1] = pb[1][k];
+                k++;
+            } else {
+                o0 = e->usecond[0]; o1 = e->usecond[1];
+            }
+            odd ^= 1;
+            l[i] = o0;
+            r[i] = o1;
+        }
+        e->uodd = odd;
+    }
+}
+
+void fx_process(fx_engine *e, float *l, float *r, int n)
+{
+    while (n > 0) {
+        int m = n < 2 * FX_CHUNK ? n : 2 * FX_CHUNK;
+        fx_piece(e, l, r, m);
         l += m; r += m; n -= m;
     }
 }
