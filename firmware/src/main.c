@@ -38,6 +38,8 @@
 #include <soc.h>
 #include <string.h>
 
+extern bool uac2_fs_fb_windows_fmt;
+
 #include "fx.h"
 
 /* ------------------------------------------------------------------ faults ---- */
