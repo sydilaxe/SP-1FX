@@ -284,8 +284,9 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
     if (fx_absf(pos - f->pos) < 1e-5f) f->pos = pos;
     float p = f->pos, t;
     int mode;
-    if (p < 0.5f - FLT_DEAD)      { mode = 0; t = (0.5f - FLT_DEAD - p) / (0.5f - FLT_DEAD); }
-    else if (p > 0.5f + FLT_DEAD) { mode = 1; t = (p - 0.5f - FLT_DEAD) / (0.5f - FLT_DEAD); }
+    /* down: low-pass; up: high-pass */
+    if (p < 0.5f - FLT_DEAD)      { mode = 1; t = (0.5f - FLT_DEAD - p) / (0.5f - FLT_DEAD); }
+    else if (p > 0.5f + FLT_DEAD) { mode = 0; t = (p - 0.5f - FLT_DEAD) / (0.5f - FLT_DEAD); }
     else                          { mode = f->mode; t = 0.0f; }
 
     f->mode_target = mode;

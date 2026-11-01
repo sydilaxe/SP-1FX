@@ -2,7 +2,7 @@
  *
  *   fader 1  DUB      70s dub reggae: big low end, dark top, tape wow and flutter, vinyl dust,
  *                     punchy bus compression and tape saturation. Down = off, up = more.
- *   fader 2  FILTER   centre = flat; down sweeps a high-pass up, up sweeps a low-pass down.
+ *   fader 2  FILTER   centre = flat; down sweeps a low-pass down, up sweeps a high-pass up.
  *   fader 3  REVERB   organic reverb (modulated feedback delay network). Down = dry, up = more
  *                     and longer.
  *   fader 4  LIMITER  mastering limiter, always on at -0.3 dBFS; the fader drives into it

@@ -345,11 +345,11 @@ int main(int argc, char **argv)
     /* ---- 2: filter ---- */
     {
         double lo0 = band_db(il, W, N, 40, 150), hi0 = band_db(il, W, N, 3000, 9000);
-        run(il, ir, l, r, N, 0, 0.0f, 0, 0, 256);
-        check(lo0 - band_db(l, W, N, 40, 150) > 30, "filter down: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
         run(il, ir, l, r, N, 0, 1.0f, 0, 0, 256);
-        check(hi0 - band_db(l, W, N, 3000, 9000) > 30, "filter up: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
-        /* a slow sweep from bottom to top, for listening */
+        check(lo0 - band_db(l, W, N, 40, 150) > 30, "filter up: high-pass cuts the lows (dB)", lo0 - band_db(l, W, N, 40, 150));
+        run(il, ir, l, r, N, 0, 0.0f, 0, 0, 256);
+        check(hi0 - band_db(l, W, N, 3000, 9000) > 30, "filter down: low-pass cuts the highs (dB)", hi0 - band_db(l, W, N, 3000, 9000));
+        /* a slow sweep from bottom (low-pass) to top (high-pass), for listening */
         fx_init(&E, SR);
         memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
         for (int i = 0; i < N; i += 256) { fx_set_fader(&E, 1, (float)i / N); fx_process(&E, l + i, r + i, 256); }

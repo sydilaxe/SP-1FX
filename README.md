@@ -15,7 +15,7 @@ the four faders, and hear it on headphones or the speaker.
 | Fader | Effect | Down | Up |
 |---|---|---|---|
 | 1 | **Dub** | off | 70s dub: big low end, a dark top, tape wow and flutter, vinyl hiss, ticks and pops, punchy bus compression and tape saturation |
-| 2 | **Filter** | high-pass, sweeping up | low-pass, sweeping down; the centre is flat, resonance grows toward the ends |
+| 2 | **Filter** | low-pass, sweeping down | high-pass, sweeping up; the centre is flat, resonance grows toward the ends |
 | 3 | **Reverb** | dry | an organic reverb (a modulated 8-line feedback delay network): more, bigger and darker as it goes up, up to about 5 s |
 | 4 | **Limiter** | 0 dB drive | +12 dB of drive into a mastering limiter (always on: 1 ms look-ahead, -1 dBFS ceiling) |
 
