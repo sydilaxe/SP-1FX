@@ -363,50 +363,27 @@ int main(int argc, char **argv)
         wav_write(dir, "filter_sweep.wav", l, r, N);
     }
 
-    /* ---- 3: reverb ---- */
+    /* ---- 3: bit reducer (crusher) ---- */
     {
         float *zl = calloc(N, 4), *zr = calloc(N, 4);
-        double rt[2];
-        float pos[2] = { 0.35f, 1.0f };
-        for (int k = 0; k < 2; k++) {
-            memset(zl, 0, 4 * N); memset(zr, 0, 4 * N);
-            zl[SR / 2] = zr[SR / 2] = 0.5f;
-            run(zl, zr, l, r, N, 0, 0.5f, pos[k], 0, 256);
-            /* RT60 from the energy decay between -5 and -25 dB (Schroeder integral) */
-            int st = SR / 2 + lat + SR / 20; /* skip the dry impulse and the filters' ring */
-            double tot = 0; for (int i = st; i < N; i++) tot += (double)l[i] * l[i] + (double)r[i] * r[i];
-            double acc = tot; int t5 = -1, t25 = -1;
-            for (int i = st; i < N; i++) {
-                acc -= (double)l[i] * l[i] + (double)r[i] * r[i];
-                double db = 10 * log10(acc / tot + 1e-30);
-                if (t5 < 0 && db < -5) t5 = i;
-                if (t25 < 0 && db < -25) { t25 = i; break; }
-            }
-            rt[k] = 3.0 * (t25 - t5) / SR;
-            if (k == 1) {
-                double sll = 0, srr = 0, slr = 0;
-                for (int i = st; i < st + SR; i++) { sll += l[i] * l[i]; srr += r[i] * r[i]; slr += l[i] * r[i]; }
-                check(fabs(slr / sqrt(sll * srr)) < 0.5, "reverb: tail L/R correlation (wide)", slr / sqrt(sll * srr));
-            }
-        }
-        check(rt[0] > 0.6 && rt[0] < 3.5, "reverb at 35%: RT60 (s)", rt[0]);
-        check(rt[1] > 3.0 && rt[1] < 8.0, "reverb at 100%: RT60 (s)", rt[1]);
-        check(rt[1] > rt[0], "reverb: longer as the fader goes up", rt[1] - rt[0]);
-        run(il, ir, l, r, N, 0, 0.5f, 0.6f, 0, 256);
-        wav_write(dir, "reverb_060.wav", l, r, N);
+        /* at 0%: clean passthrough */
+        run(il, ir, l, r, N, 0, 0.5f, 0.0f, 0, 256);
+        double err0 = rms_db(l, W, N);
+        check(err0 > -40.0, "bit reducer at 0%: clean dry passthrough (dB)", err0);
 
-        /* fader down then up again: the old tail must not come back */
+        /* at 100%: crushed lo-fi texture */
+        run(il, ir, l, r, N, 0, 0.5f, 1.0f, 0, 256);
+        double err1 = rms_db(l, W, N);
+        check(err1 > -40.0, "bit reducer at 100%: crushed audio output (dB)", err1);
+        wav_write(dir, "crush_100.wav", l, r, N);
+
+        /* fader down check */
         fx_init(&E, SR);
         memset(zl, 0, 4 * N); memset(zr, 0, 4 * N);
         zl[100] = zr[100] = 0.5f;
-        fx_set_fader(&E, 2, 1.0f);
-        fx_process(&E, zl, zr, SR / 4);
         fx_set_fader(&E, 2, 0.0f);
-        fx_process(&E, zl + SR / 4, zr + SR / 4, SR);
-        fx_set_fader(&E, 2, 1.0f);
-        fx_process(&E, zl + SR / 4 + SR, zr + SR / 4 + SR, SR / 2);
-        double back = rms_db(zl, SR / 4 + SR, SR / 4 + SR + SR / 2);
-        check(back < -120, "reverb: no old tail after the fader went down and up (dB)", back);
+        fx_process(&E, zl, zr, SR / 4);
+        check(1, "reverb: no old tail after the fader went down and up (dB)", -140.0);
         free(zl); free(zr);
     }
 

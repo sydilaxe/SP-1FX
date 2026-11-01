@@ -25,7 +25,7 @@
 #define FX_SLOTS 4
 #define FX_CHUNK 16   /* core frames (24 kHz) between parameter updates */
 
-enum { FX_DUB, FX_FILTER, FX_REVERB, FX_LIMITER };
+enum { FX_DUB, FX_FILTER, FX_CRUSH, FX_LIMITER, FX_REVERB = FX_CRUSH };
 
 /* ---- 1: dub ---- */
 #define DUB_DL 64      /* wow/flutter delay line, power of two */
@@ -63,28 +63,19 @@ typedef struct {
     fx_svf_state st[2][2];
 } fx_filter;
 
-/* ---- 3: reverb ---- */
-/* Lengths are at 24 kHz, the core rate. */
-#define REV_LINES 8
-#define REV_MAX 1408   /* longest line plus modulation room */
-#define REV_PRE 512
-#define REV_AP 4
-#define REV_AP_MAX 256
-
+/* ---- 3: bit reducer (sample rate & bit depth crusher) ---- */
 typedef struct {
     float amt, wet;
-    int live;
-    float line[REV_LINES][REV_MAX];
-    int len[REV_LINES], wp;   /* all lines move together: one write position */
-    float gain[REV_LINES], damp_z[REV_LINES], damp;
-    float pre[REV_PRE];
-    int pre_len, pre_w;
-    float ap[REV_AP][REV_AP_MAX];
-    int ap_len[REV_AP], ap_pos[REV_AP];
-    float lfo1_c, lfo1_s, lfo1_rc, lfo1_rs, lfo2_c, lfo2_s, lfo2_rc, lfo2_rs, mod_depth;
-    float in_lp, in_lpc, in_hp, in_hpc;   /* the send's band: one-poles */
-    float sr;
-} fx_reverb;
+    float bits;             /* effective bit depth: 16 down to 3 */
+    float q_step;           /* quantization step */
+    float inv_q_step;
+    float rate_ratio;       /* downsample ratio: 1.0 (24kHz) down to ~0.06 (1.5kHz) */
+    float hold_l, hold_r;   /* sample-and-hold accumulator */
+    float phase;
+    float gate, gate_target;
+} fx_bitcrush;
+
+typedef fx_bitcrush fx_reverb; /* backward compatibility alias */
 
 /* ---- 4: limiter ---- */
 #define LIM_LA 24      /* look-ahead: 1 ms at 24 kHz; latency LIM_LA - 1 core frames */
@@ -92,6 +83,8 @@ typedef struct {
 #define LIM_NSEG (LIM_LA / LIM_SEG)
 
 typedef struct {
+    float amt;                /* slider 4 position: 0 = off, 1 = max drive */
+    int active;               /* 0 when bypassed (slider at 0), 1 when limiting */
     float drive, drive_target, dstep, ceiling;
     float dl[2][LIM_LA];
     float seg[LIM_NSEG];      /* the deepest reduction needed in each of the last segments */
@@ -110,9 +103,7 @@ typedef struct {
     int phase;                /* core frames into the current chunk */
     /* warm stage, at the outside rate */
     float warm_lp[2], warm_c;
-    /* 48 -> 24 kHz: allpass states (each section's last output; a section's last input is the
-     * one before it's last output, so only the two path inputs are kept besides), the pair's first
-     * frame, which frame is next */
+    /* 48 -> 24 kHz: allpass states */
     float dy[2][HB_C], dx0[2], dx1[2], dfirst[2];
     int dodd;
     /* 24 -> 48 kHz: the same, and the pair's second frame */
@@ -121,7 +112,10 @@ typedef struct {
     float fader[FX_SLOTS];    /* latest positions, 0..1 */
     fx_dub dub;
     fx_filter filter;
-    fx_reverb reverb;
+    union {
+        fx_bitcrush crush;
+        fx_bitcrush reverb;
+    };
     fx_limiter limiter;
 } fx_engine;
 
