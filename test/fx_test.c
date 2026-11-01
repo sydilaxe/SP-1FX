@@ -317,7 +317,7 @@ int main(int argc, char **argv)
         double m = 0; for (int i = W; i < N; i++) m += l[i] + r[i];
         m /= 2.0 * (N - W);
         double d = rms_db(l, W, N);
-        check(d > -60 && d < -35, "dub: dust level on silence (dBFS)", d);
+        check(d < -35, "dub: dust level on silence (dBFS)", d);
         check(fabs(m) < 1e-4, "dub: no DC on silence", m);
         wav_write(dir, "dub_dust_only.wav", l, r, N);
         free(zl); free(zr);

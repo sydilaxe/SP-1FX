@@ -284,23 +284,22 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
     else                          { mode = f->mode; t = 0.0f; }
 
     f->mode_target = mode;
-    f->gate_target = t > 0.0f && mode == f->mode ? 1.0f : 0.0f;
     if (f->gate == 0.0f && mode != f->mode) {
         f->mode = mode;
         f->st[0][0] = f->st[0][1] = f->st[1][0] = f->st[1][1] = (fx_svf_state){0};
     }
+    f->gate_target = t > 0.0f && mode == f->mode ? 1.0f : 0.0f;
     t = fx_clampf(t, 0.0f, 1.0f);
 
     /* 24 dB/oct, juicy analog resonance and harmonic character */
-    float q1 = 0.707f + 1.8f * t;
-    float q2 = 1.6f + 4.8f * t;
-    if (f->mode == 0) {           /* high-pass: 20 Hz up to 7.2 kHz */
-        float hz = 20.0f * fx_exp2f(8.49f * t);
-        fx_svf_highpass(&f->s1, hz, q1, sr);
+    float q2 = 1.3066f * (1.0f + 3.6f * t);
+    if (f->mode == 0) {           /* high-pass: 20 Hz up to 6 kHz */
+        float hz = 20.0f * fx_exp2f(8.23f * t);
+        fx_svf_highpass(&f->s1, hz, 0.5412f, sr);
         fx_svf_highpass(&f->s2, hz, q2, sr);
-    } else {                      /* low-pass: 11.5 kHz down to 48 Hz */
-        float hz = 11500.0f * fx_exp2f(-7.90f * t);
-        fx_svf_lowpass(&f->s1, hz, q1, sr);
+    } else {                      /* low-pass: 11 kHz down to 60 Hz */
+        float hz = 11000.0f * fx_exp2f(-7.52f * t);
+        fx_svf_lowpass(&f->s1, hz, 0.5412f, sr);
         fx_svf_lowpass(&f->s2, hz, q2, sr);
     }
 }
@@ -408,7 +407,7 @@ static inline void reverb_process(fx_reverb *v, float *l, float *r, int n) { cru
 static void limiter_init(fx_limiter *m, float sr)
 {
     __builtin_memset(m, 0, sizeof *m);
-    m->ceiling = fx_db2lin(-0.3f);
+    m->ceiling = fx_db2lin(-1.0f);   /* stays <= -0.3 dBFS after polyphase half-band upsampler */
     m->rel = sample_coef(0.080f, sr);
     m->drive = m->drive_target = 1.0f;
     m->active = 0;
@@ -419,14 +418,9 @@ static void limiter_init(fx_limiter *m, float sr)
 STAGE static void limiter_control(fx_limiter *m, float pos)
 {
     m->amt = pos;
-    if (pos < LIM_DEAD) {
-        m->active = 0;
-        m->drive_target = 1.0f;
-    } else {
-        m->active = 1;
-        float t = (pos - LIM_DEAD) / (1.0f - LIM_DEAD);
-        m->drive_target = fx_db2lin(14.0f * t); /* Increases with slider 4 from 0 dB to +14 dB */
-    }
+    /* Slider 4 scales drive into the ceiling: 0 dB at bottom, +12 dB at top */
+    m->drive_target = fx_db2lin(12.0f * fx_clampf(pos, 0.0f, 1.0f));
+    m->active = pos > LIM_DEAD;
     m->dstep = (m->drive_target - m->drive) * (1.0f / (float)FX_CHUNK);
     if (fx_absf(m->drive_target - m->drive) < 1e-6f) { m->drive = m->drive_target; m->dstep = 0.0f; }
     /* the box sum drifts by rounding; resum it once per chunk */
