@@ -396,7 +396,7 @@ static void hp_codec_init(void)
 /* -------------------------------------------------------------- USB audio ----
  * The host streams 48 kHz / 24-bit stereo into a ring; the audio thread drains it. The ring's
  * fill steers the explicit feedback, so the host sends at the rate the I2S bus really runs. */
-#define USB_FRAME_BYTES 6u
+#define USB_FRAME_BYTES 4u
 #define USB_RING_FRAMES 1024u
 #define FB_SETPOINT     256   /* ~5.3 ms of input held back against USB jitter */
 RING_BUF_DECLARE(usb_ring, USB_RING_FRAMES * USB_FRAME_BYTES);
@@ -514,7 +514,7 @@ static void usb_audio_start(void)
 	usbd_uac2_set_ops(uac2_dev, &sp1_uac2_ops, NULL);
 	struct usbd_context *usbd = sample_usbd_init_device(NULL);
 	if (usbd == NULL) return;
-	(void)usbd_device_set_bcd_device(usbd, 0x0100);
+	(void)usbd_device_set_bcd_device(usbd, 0x0200);
 	(void)usbd_enable(usbd);
 }
 
@@ -525,7 +525,7 @@ static void usb_audio_start(void)
 #define BLK_BYTES  (BLK_FRAMES * 2 * (int)sizeof(int32_t))
 K_MEM_SLAB_DEFINE(tx_slab, BLK_BYTES, 8, 4);
 static const struct device *const i2s_dev = DEVICE_DT_GET(DT_NODELABEL(i2s0));
-static K_THREAD_STACK_DEFINE(audio_stack, 2048);
+static K_THREAD_STACK_DEFINE(audio_stack, 4096);
 static struct k_thread audio_tcb;
 static volatile bool g_audio_started;
 static int g_i2s_rc = 1;
@@ -567,11 +567,9 @@ static void audio_block(int32_t *out)
 		g_primed = false;
 	}
 	for (uint32_t i = 0; i < got; i++) {
-		const uint8_t *p = &g_in[i * USB_FRAME_BYTES];
-		int32_t l = (int32_t)(((uint32_t)p[0] << 8) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 24)) >> 8;
-		int32_t r = (int32_t)(((uint32_t)p[3] << 8) | ((uint32_t)p[4] << 16) | ((uint32_t)p[5] << 24)) >> 8;
-		bufl[i] = (float)l * (1.0f / 8388608.0f);
-		bufr[i] = (float)r * (1.0f / 8388608.0f);
+		const int16_t *p = (const int16_t *)&g_in[i * 4];
+		bufl[i] = (float)p[0] * (1.0f / 32768.0f);
+		bufr[i] = (float)p[1] * (1.0f / 32768.0f);
 	}
 	if (got < BLK_FRAMES) g_zero_pad += BLK_FRAMES - got;
 	for (uint32_t i = got; i < BLK_FRAMES; i++) bufl[i] = bufr[i] = 0.0f;
@@ -628,6 +626,7 @@ static void audio_thread(void *a, void *b, void *c)
 	while (1) {
 		void *blk;
 		if (k_mem_slab_alloc(&tx_slab, &blk, K_FOREVER) != 0) continue;
+		feed_wdt();
 		uint32_t c0 = DWT->CYCCNT;
 		audio_block((int32_t *)blk);
 		uint32_t us = (DWT->CYCCNT - c0) / 64u;
@@ -908,6 +907,29 @@ int main(void)
 			pwr_t = -1;
 		}
 
+		/* Feedback probe: adapt to Apple (3-byte Q10.14) vs Windows (4-byte Q16.16) */
+		{
+			static int64_t fb_probe_t;
+			static uint32_t fb_zp_last;
+			static int fb_starve_streak;
+			if (fb_probe_t == 0) {
+				fb_probe_t = now;
+				fb_zp_last = g_zero_pad;
+			} else if (now - fb_probe_t >= 100) {
+				fb_probe_t = now;
+				uint32_t zpn = g_zero_pad;
+				uint32_t d = zpn - fb_zp_last;
+				fb_zp_last = zpn;
+				if (d >= 2400u) {
+					if (++fb_starve_streak >= 4) {
+						uac2_fs_fb_windows_fmt = !uac2_fs_fb_windows_fmt;
+						fb_starve_streak = 0;
+					}
+				} else {
+					fb_starve_streak = 0;
+				}
+			}
+		}
 		/* headphones in: speaker off */
 		if (g_hp_on && now >= hp_next) {
 			hp_next = now + 250;

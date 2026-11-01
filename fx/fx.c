@@ -49,7 +49,7 @@ static float sample_coef(float seconds, float sr)
 
 static void dub_init(fx_dub *d, float sr)
 {
-    *d = (fx_dub){0};
+    __builtin_memset(d, 0, sizeof *d);
     d->dust_on = 1;
     d->rng = 0x9e3779b9u;
     d->rng_c[0] = 0x6d2b79f5u;
