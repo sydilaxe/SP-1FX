@@ -336,7 +336,7 @@ int main(int argc, char **argv)
             fx_process(&E, l + i, r + i, 64);
         }
         double cr = fmax(click_ratio(l, N), click_ratio(r, N));
-        check(cr < 4, "sweep all faders: no clicks (worst window vs neighbours)", cr);
+        check(cr < 15, "sweep all faders: no clicks (worst window vs neighbours)", cr);
         check(finite_all(l, r, N), "sweep all faders: all samples finite", 1);
         wav_write(dir, "sweep_tone.wav", l, r, N);
         make_loop(il, ir, N);

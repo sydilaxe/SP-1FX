@@ -321,8 +321,6 @@ STAGE static void filter_process(fx_filter *f, float *l, float *r, int n, float 
         for (int i = 0; i < n; i++) {
             float y = fx_svf_tick(A.a1, A.a2, A.a3, A.m0, A.m1, A.m2, &a1, &a2, x[i]);
             y = fx_svf_tick(B.a1, B.a2, B.a3, B.m0, B.m1, B.m2, &b1, &b2, y);
-            /* Soft analog saturation on resonance peaks gives distinct synth character */
-            if (fx_absf(y) > 0.85f) y = fx_softclip(y);
             x[i] += gate[i] * (y - x[i]);
         }
         f->st[c][0].ic1 = a1; f->st[c][0].ic2 = a2; f->st[c][1].ic1 = b1; f->st[c][1].ic2 = b2;
