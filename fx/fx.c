@@ -52,6 +52,7 @@ static void dub_init(fx_dub *d, float sr)
     __builtin_memset(d, 0, sizeof *d);
     d->dust_on = 0; /* disabled: eliminates CPU drain and annoying hiss/pops */
     d->gain = 1.0f;
+    d->speed_mod = 0.5f;
     osc_init(&d->wow_c, &d->wow_s, &d->wow_rc, &d->wow_rs, 0.55f, 0.0f, sr);
     osc_init(&d->flt_c, &d->flt_s, &d->flt_rc, &d->flt_rs, 7.3f, 1.0f, sr);
     d->att = sample_coef(0.004f, sr);   /* 4ms punchy attack lets transients punch through */
@@ -70,22 +71,28 @@ STAGE static void dub_control(fx_dub *d, float pos, float sr)
     d->gate_target = pos < DUB_DEAD ? 0.0f : 1.0f;
     float a = d->amt;
 
-    /* EQ: fat warm dub low end, de-mudded mid, punchy body */
+    /* secondary param: tape modulation speed (0.22 Hz to 1.1 Hz) */
+    float speed_mult = 0.4f + 1.2f * d->speed_mod;
+    float t_wow = fx_tanf(FX_PI * (0.55f * speed_mult) / sr), t_wow2 = t_wow * t_wow;
+    d->wow_rc = (1.0f - t_wow2) / (1.0f + t_wow2);
+    d->wow_rs = 2.0f * t_wow / (1.0f + t_wow2);
+
+    /* EQ: fat warm dub low end, de-mudded mid, punchy body (musical without square-wave fuzz) */
     d->hp_c = 2.0f * FX_PI * (20.0f + 15.0f * a) / sr;
-    fx_svf_lowshelf(&d->shelf, 95.0f, 0.75f, 11.5f * a, sr);
-    fx_svf_bell(&d->cut, 300.0f, 0.9f, -4.5f * a, sr);
-    fx_svf_bell(&d->pres, 1600.0f, 0.85f, 3.5f * a, sr);
-    fx_svf_lowpass(&d->lp, 11000.0f * fx_exp2f(-1.40f * a), 0.65f, sr);
+    fx_svf_lowshelf(&d->shelf, 95.0f, 0.75f, 5.2f * a, sr);
+    fx_svf_bell(&d->cut, 300.0f, 0.9f, -2.5f * a, sr);
+    fx_svf_bell(&d->pres, 1600.0f, 0.85f, 1.5f * a, sr);
+    fx_svf_lowpass(&d->lp, 11500.0f * fx_exp2f(-0.90f * a), 0.65f, sr);
 
     /* punch: bus compressor with punchy attack, deeper knee and thick makeup */
-    d->thr = -8.0f - 11.0f * a;
-    d->slope = 1.0f / (1.0f + 2.5f * a) - 1.0f;
-    d->makeup = -d->slope * (-d->thr) * 0.58f;
+    d->thr = -10.0f - 8.0f * a;
+    d->slope = 1.0f / (1.0f + 1.5f * a) - 1.0f;
+    d->makeup = -d->slope * (-d->thr) * 0.45f;
 
-    /* tape saturation: gritty, warm and punchy */
-    d->drive = 1.0f + 3.2f * a;
-    d->sat_mix = fx_clampf(4.5f * a, 0.0f, 1.0f);
-    d->bias = 0.16f * a;
+    /* tape saturation: warm analog tape compression, clean and musical */
+    d->drive = 1.0f + 0.75f * a;
+    d->sat_mix = fx_clampf(2.0f * a, 0.0f, 0.85f);
+    d->bias = 0.05f * a;
     d->bias_out = fx_softclip(d->bias);
     d->inv_drive = 1.0f / d->drive;
 
@@ -102,7 +109,7 @@ STAGE static void dub_control(fx_dub *d, float pos, float sr)
     d->pop_p = 0.0f;
     d->pop_amp = 0.0f;
 
-    d->trim = fx_db2lin(-9.0f * a);
+    d->trim = fx_db2lin(-4.0f * a);
 
     osc_norm(&d->wow_c, &d->wow_s);
     osc_norm(&d->flt_c, &d->flt_s);
@@ -117,10 +124,25 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
     /* 1: the tape: write the delay line, read the dry centre tap and the wobbling wet tap */
     {
         int wpos = d->wpos;
+        float *b0 = d->dl[0], *b1 = d->dl[1];
+
+        if (wet_off) {
+            /* Zero-overhead fast path when Dub is bypassed: maintain delay alignment without LFO compute */
+            for (int i = 0; i < n; i++) {
+                b0[wpos] = l[i];
+                b1[wpos] = r[i];
+                int tap = (wpos - DUB_CENTER) & (DUB_DL - 1);
+                l[i] = b0[tap];
+                r[i] = b1[tap];
+                wpos = (wpos + 1) & (DUB_DL - 1);
+            }
+            d->wpos = wpos;
+            return;
+        }
+
         float wc = d->wow_c, ws = d->wow_s, fc = d->flt_c, fs = d->flt_s;
         const float wrc = d->wow_rc, wrs = d->wow_rs, frc = d->flt_rc, frs = d->flt_rs;
         const float wd = d->wow_depth, fd = d->flt_depth;
-        float *b0 = d->dl[0], *b1 = d->dl[1];
         for (int i = 0; i < n; i++) {
             b0[wpos] = l[i];
             b1[wpos] = r[i];
@@ -129,22 +151,16 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             dry[1][i] = b1[tap];
             float t = wc * wrc - ws * wrs; ws = ws * wrc + wc * wrs; wc = t;
             t = fc * frc - fs * frs; fs = fs * frc + fc * frs; fc = t;
-            if (!wet_off) {
-                float idx = (float)(wpos + DUB_DL) - ((float)DUB_CENTER + wd * ws + fd * fs);
-                int i0 = (int)idx;
-                float fr = idx - (float)i0;
-                int k0 = i0 & (DUB_DL - 1), k1 = (i0 + 1) & (DUB_DL - 1);
-                x[0][i] = b0[k0] + fr * (b0[k1] - b0[k0]);
-                x[1][i] = b1[k0] + fr * (b1[k1] - b1[k0]);
-            }
+            float idx = (float)(wpos + DUB_DL) - ((float)DUB_CENTER + wd * ws + fd * fs);
+            int i0 = (int)idx;
+            float fr = idx - (float)i0;
+            int k0 = i0 & (DUB_DL - 1), k1 = (i0 + 1) & (DUB_DL - 1);
+            x[0][i] = b0[k0] + fr * (b0[k1] - b0[k0]);
+            x[1][i] = b1[k0] + fr * (b1[k1] - b1[k0]);
             wpos = (wpos + 1) & (DUB_DL - 1);
         }
         d->wpos = wpos;
         d->wow_c = wc; d->wow_s = ws; d->flt_c = fc; d->flt_s = fs;
-    }
-    if (wet_off) {
-        for (int i = 0; i < n; i++) { l[i] = dry[0][i]; r[i] = dry[1][i]; }
-        return;
     }
 
     /* 2: the EQ, one channel at a time so the filter states stay in registers */
@@ -292,7 +308,8 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
     t = fx_clampf(t, 0.0f, 1.0f);
 
     /* 24 dB/oct, juicy analog resonance and harmonic character */
-    float q2 = 1.3066f * (1.0f + 3.6f * t);
+    float res_scale = 0.3f + 1.4f * f->res;
+    float q2 = 1.3066f * (1.0f + 3.6f * t * res_scale);
     if (f->mode == 0) {           /* high-pass: 20 Hz up to 6 kHz */
         float hz = 20.0f * fx_exp2f(8.23f * t);
         fx_svf_highpass(&f->s1, hz, 0.5412f, sr);
@@ -339,6 +356,7 @@ static void crush_init(fx_bitcrush *c, float sr)
     c->q_step = 1.0f / 32768.0f;
     c->inv_q_step = 32768.0f;
     c->rate_ratio = 1.0f;
+    c->rate_mod = 0.5f;
 }
 
 STAGE static void crush_control(fx_bitcrush *c, float pos, float sr)
@@ -357,8 +375,9 @@ STAGE static void crush_control(fx_bitcrush *c, float pos, float sr)
     c->q_step = 2.0f / levels;
     c->inv_q_step = 1.0f / c->q_step;
 
-    /* Downsample factor: 1.0 (no sample hold) down to ~0.08 (~1.9 kHz rate) */
-    c->rate_ratio = 1.0f / (1.0f + 11.0f * a * a);
+    /* Downsample factor: 1.0 down to ~0.08, scaled by secondary param rate_mod */
+    float rate_scale = 0.2f + 1.6f * c->rate_mod;
+    c->rate_ratio = 1.0f / (1.0f + 11.0f * a * a * rate_scale);
     c->wet = fx_clampf(1.25f * a, 0.0f, 1.0f);
 }
 
@@ -406,9 +425,12 @@ static void limiter_init(fx_limiter *m, float sr)
 {
     __builtin_memset(m, 0, sizeof *m);
     m->ceiling = fx_db2lin(-1.0f);   /* stays <= -0.3 dBFS after polyphase half-band upsampler */
-    m->rel = sample_coef(0.080f, sr);
+    m->rel_fast = sample_coef(0.055f, sr); /* T4B fast initial 50% release ~55ms */
+    m->rel_slow = sample_coef(0.650f, sr); /* T4B slow exponential tail ~650ms */
+    m->rel_mod = 0.5f;              /* default balanced leveling mode */
     m->drive = m->drive_target = 1.0f;
     m->active = 0;
+    m->opt_mem = 0.0f;
 }
 
 #define LIM_DEAD 0.02f
@@ -416,11 +438,18 @@ static void limiter_init(fx_limiter *m, float sr)
 STAGE static void limiter_control(fx_limiter *m, float pos)
 {
     m->amt = pos;
-    /* Slider 4 scales drive into the ceiling: 0 dB at bottom, +12 dB at top */
+    /* Slider 4: LA-2A Peak Reduction knob: 0 dB at bottom, +12 dB at top */
     m->drive_target = fx_db2lin(12.0f * fx_clampf(pos, 0.0f, 1.0f));
     m->active = pos > LIM_DEAD;
     m->dstep = (m->drive_target - m->drive) * (1.0f / (float)FX_CHUNK);
     if (fx_absf(m->drive_target - m->drive) < 1e-6f) { m->drive = m->drive_target; m->dstep = 0.0f; }
+
+    /* secondary param: Mode (0.0 = Compress ~3.5:1, 1.0 = Limit ~18:1) & T4B optical release speed */
+    float rel_s_fast = 0.035f + 0.040f * (1.0f - m->rel_mod);
+    float rel_s_slow = 0.400f + 0.600f * (1.0f - m->rel_mod);
+    m->rel_fast = sample_coef(rel_s_fast, 24000.0f);
+    m->rel_slow = sample_coef(rel_s_slow, 24000.0f);
+
     /* the box sum drifts by rounding; resum it once per chunk */
     float s = 0.0f;
     for (int k = 0; k < LIM_LA; k++) s += m->box[k];
@@ -430,9 +459,10 @@ STAGE static void limiter_control(fx_limiter *m, float pos)
 STAGE static void limiter_process(fx_limiter *m, float *l, float *r, int n)
 {
     if (!m->active && m->gr < 1e-4f && m->held < 1e-4f) {
-        /* Slider 4 is at 0: Limiter is completely bypassed with zero CPU waste */
+        /* Slider 4 is at 0: LA-2A is completely bypassed with zero CPU waste */
         m->drive = 1.0f;
         m->meter = 0.0f;
+        m->opt_mem = 0.0f;
         int p = m->pos;
         for (int i = 0; i < n; i++) {
             int q = p + 1 < LIM_LA ? p + 1 : 0;
@@ -445,20 +475,35 @@ STAGE static void limiter_process(fx_limiter *m, float *l, float *r, int n)
         return;
     }
 
-    const float ceil = m->ceiling, rel = m->rel, inv_la = 1.0f / (float)LIM_LA;
+    const float ceil = m->ceiling, inv_la = 1.0f / (float)LIM_LA;
+    const float rel_fast = m->rel_fast, rel_slow = m->rel_slow;
+    const float knee_ratio = 0.70f + 0.30f * m->rel_mod; /* ~3.5:1 up to ~18:1 */
     float drive = m->drive, cur = m->cur, held = m->held, sum = m->box_sum, gr = m->gr;
-    float meter = m->meter;
+    float meter = m->meter, opt_mem = m->opt_mem;
     int p = m->pos, sn = m->sn, si = m->si;
+
     for (int i = 0; i < n; i++) {
         drive += m->dstep;
         float xl = l[i] * drive, xr = r[i] * drive;
 
-        /* the reduction this frame needs to sit under the ceiling */
+        /* LA-2A T4B electro-optical detector with buttery soft knee */
         float al = fx_absf(xl), ar = fx_absf(xr);
         float pk = al > ar ? al : ar;
-        float need = pk > ceil ? 1.0f - ceil / pk : 0.0f;
+        float need = 0.0f;
 
-        /* peak hold over the look-ahead window and up to one segment more */
+        /* Soft-knee onset starts ~2.5 dB below ceiling (0.75 * ceil) */
+        float knee_onset = 0.75f * ceil;
+        if (pk > knee_onset) {
+            float over = (pk - knee_onset) / (pk + 1e-6f);
+            need = over * over * knee_ratio;
+            /* Guaranteed ceiling protection */
+            if (pk > ceil) {
+                float brick = 1.0f - ceil / pk;
+                if (brick > need) need = brick;
+            }
+        }
+
+        /* Peak hold over the look-ahead window */
         if (need > cur) cur = need;
         float hold = cur > held ? cur : held;
         if (++sn == LIM_SEG) {
@@ -471,27 +516,41 @@ STAGE static void limiter_process(fx_limiter *m, float *l, float *r, int n)
             held = h;
         }
 
-        /* box filter of the held reduction over the window */
+        /* Box smoothing over the lookahead window (eliminates clicks & hard edges) */
         sum += hold - m->box[p];
         m->box[p] = hold;
         float box = sum * inv_la;
         if (box < 1e-7f) box = 0.0f;
 
-        if (box > gr) gr = box;
-        else gr += rel * (box - gr);
+        /* T4B dual-stage optical ballistics */
+        if (box > gr) {
+            /* ~10ms electro-optical attack */
+            gr = box;
+            opt_mem += 0.0005f * (box - opt_mem);
+        } else {
+            /* Two-stage release: fast initial recovery for first 50%, slow exponential tail */
+            float rk = (gr > 0.45f * opt_mem) ? rel_fast : rel_slow;
+            gr += rk * (box - gr);
+            opt_mem *= 0.9996f;
+        }
         if (gr > meter) meter = gr;
 
-        /* the delayed frame out, LIM_LA - 1 frames later */
+        /* Delayed signal LIM_LA - 1 frames later with tube output saturation */
         int q = p + 1 < LIM_LA ? p + 1 : 0;
         float g = 1.0f - gr;
         float ol = m->dl[0][q] * g, orr = m->dl[1][q] * g;
         m->dl[0][p] = xl; m->dl[1][p] = xr;
+
+        /* 12AX7 triode subtle harmonic warmth without harsh clipping */
+        ol = ol - 0.04f * ol * ol - 0.10f * ol * ol * ol;
+        orr = orr - 0.04f * orr * orr - 0.10f * orr * orr * orr;
+
         l[i] = fx_clampf(ol, -ceil, ceil);
         r[i] = fx_clampf(orr, -ceil, ceil);
         p = q;
     }
     m->drive = drive; m->cur = cur; m->held = held; m->box_sum = sum; m->gr = gr;
-    m->meter = meter; m->pos = p; m->sn = sn; m->si = si;
+    m->meter = meter; m->pos = p; m->sn = sn; m->si = si; m->opt_mem = opt_mem;
 }
 
 /* ================================================================ engine ==== */
@@ -539,9 +598,11 @@ void fx_init(fx_engine *e, float sr)
     e->fader[FX_FILTER] = 0.5f;
     e->fader[FX_CRUSH] = 0.0f;
     e->fader[FX_LIMITER] = 0.0f;
+    for (int k = 0; k < FX_SLOTS; k++) e->param2[k] = 0.5f;
     e->warm_c = sample_coef(1.0f / (2.0f * FX_PI * 3500.0f), sr);
     dub_init(&e->dub, e->cr);
     e->filter.pos = 0.5f;
+    e->filter.res = 0.5f;
     crush_init(&e->crush, e->cr);
     limiter_init(&e->limiter, e->cr);
 }
@@ -549,6 +610,18 @@ void fx_init(fx_engine *e, float sr)
 void fx_set_fader(fx_engine *e, int slot, float pos)
 {
     if (slot >= 0 && slot < FX_SLOTS) e->fader[slot] = fx_clampf(pos, 0.0f, 1.0f);
+}
+
+void fx_set_param2(fx_engine *e, int slot, float pos)
+{
+    if (slot >= 0 && slot < FX_SLOTS) {
+        pos = fx_clampf(pos, 0.0f, 1.0f);
+        e->param2[slot] = pos;
+        if (slot == FX_DUB) e->dub.speed_mod = pos;
+        else if (slot == FX_FILTER) e->filter.res = pos;
+        else if (slot == FX_CRUSH) e->crush.rate_mod = pos;
+        else if (slot == FX_LIMITER) e->limiter.rel_mod = pos;
+    }
 }
 
 int fx_latency(const fx_engine *e)

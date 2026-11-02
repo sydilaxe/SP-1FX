@@ -356,6 +356,20 @@ int main(int argc, char **argv)
         run(il, ir, l, r, N, 0, 0.59f, 0, 0, 256);
         flat = flat && !memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N);
         check(flat, "filter: flat anywhere in the middle fifth (0.41 and 0.59)", flat);
+        /* check secondary param: resonance boost */
+        fx_init(&E, SR);
+        fx_set_fader(&E, 1, 0.25f); /* low-pass */
+        fx_set_param2(&E, 1, 0.0f); /* low resonance */
+        memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
+        fx_process(&E, l, r, N);
+        double r_lo = rms_db(l, W, N);
+        fx_init(&E, SR);
+        fx_set_fader(&E, 1, 0.25f);
+        fx_set_param2(&E, 1, 1.0f); /* high resonance */
+        memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
+        fx_process(&E, l, r, N);
+        double r_hi = rms_db(l, W, N);
+        check(r_hi > r_lo, "filter: secondary param resonance increases peak energy", r_hi - r_lo);
         /* a slow sweep from bottom (low-pass) to top (high-pass), for listening */
         fx_init(&E, SR);
         memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);

@@ -94,8 +94,8 @@
 		as_iso_out: out_interface {
 			compatible = "zephyr,uac2-audio-streaming";
 			linked-terminal = <&in_terminal>;
-			subslot-size = <2>;
-			bit-resolution = <16>;
+			subslot-size = <3>;
+			bit-resolution = <24>;
 		};
 	};
 };

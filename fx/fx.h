@@ -52,6 +52,7 @@ typedef struct {
     float tick_p, tick_amp, tick_env[2], tick_dec;
     float pop_p, pop_amp, pop_env, pop_dec, pop_lp, pop_c;
     float trim;
+    float speed_mod;           /* secondary param: tape modulation speed (0..1, default 0.5) */
     int dust_on; /* 1; the tests turn it off to look for clicks */
 } fx_dub;
 
@@ -59,6 +60,7 @@ typedef struct {
 typedef struct {
     float pos, gate, gate_target;
     int mode, mode_target; /* 0 high-pass, 1 low-pass */
+    float res;             /* secondary param: resonance amount (0..1, default 0.5) */
     fx_svf s1, s2;
     fx_svf_state st[2][2];
 } fx_filter;
@@ -70,6 +72,7 @@ typedef struct {
     float q_step;           /* quantization step */
     float inv_q_step;
     float rate_ratio;       /* downsample ratio: 1.0 (24kHz) down to ~0.06 (1.5kHz) */
+    float rate_mod;         /* secondary param: clock rate override (0..1, default 0.5) */
     float hold_l, hold_r;   /* sample-and-hold accumulator */
     float phase;
     float gate, gate_target;
@@ -77,22 +80,25 @@ typedef struct {
 
 typedef fx_bitcrush fx_reverb; /* backward compatibility alias */
 
-/* ---- 4: limiter ---- */
+/* ---- 4: LA-2A optical leveling amplifier ---- */
 #define LIM_LA 24      /* look-ahead: 1 ms at 24 kHz; latency LIM_LA - 1 core frames */
-#define LIM_SEG 8      /* the peak hold works in segments of 8 frames */
+#define LIM_SEG 8      /* segment size for detector smoothing */
 #define LIM_NSEG (LIM_LA / LIM_SEG)
 
 typedef struct {
-    float amt;                /* slider 4 position: 0 = off, 1 = max drive */
-    int active;               /* 0 when bypassed (slider at 0), 1 when limiting */
+    float amt;                /* slider 4 position: Peak Reduction (0 = off, 1 = +12 dB) */
+    int active;               /* 0 when bypassed (Peak Reduction at 0), 1 when active */
+    float rel_mod;            /* secondary param: Mode (0 = Compress 3.5:1, 1 = Limit 18:1) */
     float drive, drive_target, dstep, ceiling;
     float dl[2][LIM_LA];
-    float seg[LIM_NSEG];      /* the deepest reduction needed in each of the last segments */
-    float cur, held;          /* this segment so far; the finished segments */
-    int si, sn;               /* segment index, frames into it */
+    float seg[LIM_NSEG];      /* segmented detector state */
+    float cur, held;          /* peak detector tracking */
+    int si, sn;
     float box[LIM_LA], box_sum;
     int pos;
-    float gr, rel;            /* reduction applied, release coefficient */
+    float gr;                 /* current optical gain reduction */
+    float rel_fast, rel_slow; /* T4B dual-stage release coefficients */
+    float opt_mem;            /* electro-luminescent memory */
     float meter;              /* deepest reduction since last read, 0..1 */
 } fx_limiter;
 
@@ -109,7 +115,8 @@ typedef struct {
     /* 24 -> 48 kHz: the same, and the pair's second frame */
     float uy[2][HB_C], ux0[2], ux1[2], usecond[2];
     int uodd;
-    float fader[FX_SLOTS];    /* latest positions, 0..1 */
+    float fader[FX_SLOTS];    /* latest main positions (Page 0), 0..1 */
+    float param2[FX_SLOTS];   /* secondary page parameters (Page 1), 0..1 */
     fx_dub dub;
     fx_filter filter;
     union {
@@ -120,7 +127,8 @@ typedef struct {
 } fx_engine;
 
 void fx_init(fx_engine *e, float sr);
-void fx_set_fader(fx_engine *e, int slot, float pos);   /* pos 0..1 */
+void fx_set_fader(fx_engine *e, int slot, float pos);   /* main pos 0..1 */
+void fx_set_param2(fx_engine *e, int slot, float pos);  /* secondary pos 0..1 */
 void fx_process(fx_engine *e, float *l, float *r, int n); /* in place */
 int fx_latency(const fx_engine *e);                       /* frames */
 
