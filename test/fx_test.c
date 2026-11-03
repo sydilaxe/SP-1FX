@@ -1,4 +1,4 @@
-/* Host test for the SP-1 effects engine: renders WAVs into build/sp1 and checks the behaviour.
+/* Host test for the SP-1 effects engine: renders WAVs into build/test and checks the behaviour.
  *   fx_test [OUTDIR]                       run the checks and write the WAVs
  *   fx_test OUTDIR IN.wav F1 F2 F3 F4      also run a 48 kHz stereo 16/24-bit WAV through the
  *                                          chain at those fader positions (0..1) */
@@ -192,17 +192,37 @@ static double max_d2(const float *x, int n) /* largest second difference */
     return m;
 }
 
+/* residual: the output against the input it came from, relative to the input (dB) */
+static double residual_db(const float *y, const float *x, int lat, int from, int n)
+{
+    double e = 0, s = 0;
+    for (int i = from; i < n; i++) { double d = y[i] - x[i - lat]; e += d * d; s += (double)x[i - lat] * x[i - lat]; }
+    return 10 * log10(e / s + 1e-30);
+}
+
+/* dropouts: % of 2.5 ms windows where the output is 20 dB under the input it came from (only
+ * windows where the input is above -60 dBFS count) */
+static double drop_pct(const float *y, const float *x, int lat, int from, int n)
+{
+    int W = 120, tot = 0, bad = 0;
+    for (int w = from / W; (w + 1) * W < n; w++) {
+        double ey = 0, ex = 0;
+        for (int i = w * W; i < w * W + W; i++) { ey += (double)y[i] * y[i]; ex += (double)x[i - lat] * x[i - lat]; }
+        if (ex / W < 1e-6) continue;
+        tot++;
+        if (ey < ex * 0.01) bad++;
+    }
+    return tot ? 100.0 * bad / tot : 0;
+}
+
 static void faders(float f1, float f2, float f3, float f4)
 {
     fx_set_fader(&E, 0, f1); fx_set_fader(&E, 1, f2); fx_set_fader(&E, 2, f3); fx_set_fader(&E, 3, f4);
 }
 
-static int g_no_dust;   /* measure the dub's EQ without its record noise */
-
 static void run(const float *il, const float *ir, float *ol, float *orr, int n, float f1, float f2, float f3, float f4, int block)
 {
     fx_init(&E, SR);
-    if (g_no_dust) E.dub.dust_on = 0;
     faders(f1, f2, f3, f4);
     memcpy(ol, il, sizeof(float) * n); memcpy(orr, ir, sizeof(float) * n);
     unsigned s = 7;
@@ -212,6 +232,26 @@ static void run(const float *il, const float *ir, float *ol, float *orr, int n, 
         fx_process(&E, ol + i, orr + i, m);
         i += m;
     }
+}
+
+/* the LA-2A on a 440 Hz tone stepping between -6 and -26 dBFS every second: the step that
+ * comes out, measured over the last 0.3 s of each second, averaged */
+static double level_steps(float fader, float mode)
+{
+    int n = 8 * SR;
+    float *a = malloc(4 * n), *b = malloc(4 * n);
+    for (int i = 0; i < n; i++) a[i] = b[i] = (float)(((i / SR) & 1 ? 0.05 : 0.5) * sin(2 * M_PI * 440.0 * i / SR));
+    fx_init(&E, SR); faders(0, 0.5f, 0, fader); fx_set_param2(&E, 3, mode);
+    fx_process(&E, a, b, n);
+    double sum = 0; int k = 0;
+    for (int s = 2; s + 1 < 8; s += 2) {
+        int lat = fx_latency(&E);
+        double hi = rms_db(a + lat, (int)(s * SR + 0.7 * SR), (s + 1) * SR);
+        double lo = rms_db(a + lat, (int)((s + 1) * SR + 0.7 * SR), (s + 2) * SR - lat);
+        sum += hi - lo; k++;
+    }
+    free(a); free(b);
+    return sum / k;
 }
 
 int main(int argc, char **argv)
@@ -233,7 +273,7 @@ int main(int argc, char **argv)
     check(ee < 1e-5, "math: exp2 relative error", ee);
     check(el < 1e-4, "math: log2 absolute error", el);
 
-    /* at rest: the input, warm (the 24 kHz core, the warm stage), at the stated latency */
+    /* at rest: the input, exactly, at the stated latency */
     run(il, ir, l, r, N, 0, 0.5f, 0, 0, 256);
     {
         int best = 0; double bc = -1;
@@ -246,36 +286,18 @@ int main(int argc, char **argv)
         check(abs(best - lat) <= 1, "rest: the input comes out at the stated latency (frames)", best);
         check(bc > 0.98, "rest: and still the input (correlation)", bc);
         check(fabs(rms_db(l, W, N) - rms_db(il, W, N)) < 1.0, "rest: level change (dB)", rms_db(l, W, N) - rms_db(il, W, N));
-        /* a 15 kHz tone at a loud top-end level (-20 dBFS): above the core's band, so nothing
-         * comes out, aliased or not (the warm stage's third harmonic folds; at -6 dBFS it would
-         * be -46 dB, a level real top end doesn't reach) */
-        float *tl = malloc(4 * N), *tr = malloc(4 * N);
-        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.1f * (float)sin(2 * M_PI * 15000.0 * i / SR);
-        run(tl, tr, l2, r2, N, 0, 0.5f, 0, 0, 256);
-        double rej = rms_db(l2, W, N) - rms_db(tl, W, N);
-        check(rej < -70, "rest: a 15 kHz tone is gone, no alias (dB)", rej);
-        free(tl); free(tr);
+        /* at rest the engine is a delay: the input, bit for bit */
+        int exact = 1;
+        for (int i = lat; i < N; i++) if (l[i] != il[i - lat] || r[i] != ir[i - lat]) { exact = 0; break; }
+        check(exact, "rest: bit-exact input at the stated latency", exact);
     }
-    {   /* clean: a 1 kHz tone at -6 dBFS, the warm stage's harmonics and nothing else */
+    {   /* full bandwidth: an 18 kHz tone comes through at rest, and with every effect in except
+         * the low-pass, still there */
         float *tl = malloc(4 * N), *tr = malloc(4 * N);
-        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.5f * (float)sin(2 * M_PI * 997.0 * i / SR);
-        run(tl, tr, l, r, N, 0, 0.5f, 0, 0, 256);
-        /* everything that isn't 997 Hz or its harmonics: notch them out, measure the rest */
-        double sig = rms_db(l, W, N), e = 0;
-        double a0 = 0, b0 = 0;
-        for (int h = 1; h <= 11; h++) {
-            double a = 0, b = 0, w = 2 * M_PI * 997.0 * h / SR;
-            for (int i = W; i < N; i++) { a += l[i] * cos(w * i); b += l[i] * sin(w * i); }
-            a *= 2.0 / (N - W); b *= 2.0 / (N - W);
-            if (h == 1) { a0 = a; b0 = b; }
-            e += (a * a + b * b) / 2;
-        }
-        double tot = 0; for (int i = W; i < N; i++) tot += (double)l[i] * l[i];
-        tot /= (N - W);
-        double noise = 10 * log10(fmax(tot - e, 1e-30)) - sig;
-        double thd = 10 * log10(fmax(e - (a0 * a0 + b0 * b0) / 2, 1e-30) / ((a0 * a0 + b0 * b0) / 2));
-        check(noise < -80, "rest: noise and aliasing on a -6 dBFS 1 kHz tone (dB)", noise);
-        check(thd < -30 && thd > -60, "rest: warm stage harmonics on it (THD dB)", thd);
+        for (int i = 0; i < N; i++) tl[i] = tr[i] = 0.25f * (float)sin(2 * M_PI * 18000.0 * i / SR);
+        run(tl, tr, l2, r2, N, 0, 0.5f, 0, 0, 256);
+        double g = rms_db(l2, W, N) - rms_db(tl, W, N);
+        check(fabs(g) < 0.01, "rest: an 18 kHz tone passes (full bandwidth) (dB)", g);
         free(tl); free(tr);
     }
 
@@ -289,7 +311,6 @@ int main(int argc, char **argv)
 
     /* ---- 1: dub ---- */
     double tilt0, tilt1, rms0, rms1;
-    g_no_dust = 1;
     run(il, ir, l, r, N, 0, 0.5f, 0, 0, 256);
     tilt0 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
     rms0 = rms_db(l, W, N);
@@ -298,28 +319,26 @@ int main(int argc, char **argv)
     run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
     wav_write(dir, "dub_100.wav", l, r, N);
     tilt1 = band_db(l, W, N, 40, 150) - band_db(l, W, N, 3000, 9000);
-    g_no_dust = 0;
-    run(il, ir, l, r, N, 1.0f, 0.5f, 0, 0, 256);
     rms1 = rms_db(l, W, N);
     check(tilt1 - tilt0 > 8, "dub: bass over treble, full vs off (dB)", tilt1 - tilt0);
-    check(fabs(rms1 - rms0) < 2, "dub: loudness change, full vs off (dB)", rms1 - rms0);
+    check(fabs(rms1 - rms0) < 1, "dub: loudness change, full vs off (dB)", rms1 - rms0);
     {
         double c0, c1, p0 = 0, p1 = 0;
         run(il, ir, l2, r2, N, 0, 0.5f, 0, 0, 256);
         for (int i = W; i < N; i++) { p0 = fmax(p0, fabs(l2[i])); p1 = fmax(p1, fabs(l[i])); }
         c0 = 20 * log10(p0) - rms0; c1 = 20 * log10(p1) - rms1;
+        check(p1 <= p0 * 1.06, "dub: peaks no higher at full than off (ratio)", p1 / p0);
         printf("%-58s %10.4f\n", "dub: crest factor off (dB)", c0);
         printf("%-58s %10.4f\n", "dub: crest factor full (dB)", c1);
     }
-    {   /* dust on silence */
+    {   /* silence in, silence out */
         float *zl = calloc(N, 4), *zr = calloc(N, 4);
         run(zl, zr, l, r, N, 1.0f, 0.5f, 0, 0, 256);
         double m = 0; for (int i = W; i < N; i++) m += l[i] + r[i];
         m /= 2.0 * (N - W);
         double d = rms_db(l, W, N);
-        check(d < -35, "dub: dust level on silence (dBFS)", d);
-        check(fabs(m) < 1e-4, "dub: no DC on silence", m);
-        wav_write(dir, "dub_dust_only.wav", l, r, N);
+        check(d < -100, "dub: silence stays silent (dBFS)", d);
+        check(fabs(m) < 1e-6, "dub: no DC on silence", m);
         free(zl); free(zr);
     }
 
@@ -327,7 +346,6 @@ int main(int argc, char **argv)
     {
         for (int i = 0; i < N; i++) il[i] = ir[i] = 0.25f * (float)sin(2 * M_PI * 220.0 * i / SR);
         fx_init(&E, SR);
-        E.dub.dust_on = 0;
         memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N);
         for (int i = 0; i < N; i += 64) {
             double t = (double)i / N;
@@ -377,44 +395,133 @@ int main(int argc, char **argv)
         wav_write(dir, "filter_sweep.wav", l, r, N);
     }
 
-    /* ---- 3: bit reducer (crusher) ---- */
+    /* ---- 3: bit reducer ---- */
     {
-        float *zl = calloc(N, 4), *zr = calloc(N, 4);
-        /* at 0%: clean passthrough */
-        run(il, ir, l, r, N, 0, 0.5f, 0.0f, 0, 256);
-        double err0 = rms_db(l, W, N);
-        check(err0 > -40.0, "bit reducer at 0%: clean dry passthrough (dB)", err0);
+        /* off: the input, exactly */
+        run(il, ir, l2, r2, N, 0, 0.5f, 0, 0, 256);
+        run(il, ir, l, r, N, 0, 0.5f, 0.02f, 0, 256);
+        check(!memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N), "crush at 0: off (output = input)", 1);
 
-        /* at 100%: crushed lo-fi texture */
+        /* full: really crushed, but it never drops out: quiet passages are crushed, not gated */
         run(il, ir, l, r, N, 0, 0.5f, 1.0f, 0, 256);
-        double err1 = rms_db(l, W, N);
-        check(err1 > -40.0, "bit reducer at 100%: crushed audio output (dB)", err1);
         wav_write(dir, "crush_100.wav", l, r, N);
+        double res = residual_db(l, il, lat, W, N);
+        check(res > -20, "crush at full: crushed (residual vs input, dB)", res);
+        double sw = drop_pct(l, il, lat, W, N);
+        check(sw < 0.5, "crush at full: no dropouts (% of 2.5 ms windows 20 dB down)", sw);
+        /* the same on a quiet input (-30 dB): the old fixed-step crusher gated this to silence */
+        for (int i = 0; i < N; i++) { l2[i] = il[i] * 0.03f; r2[i] = ir[i] * 0.03f; }
+        float *ql = malloc(4 * N), *qr = malloc(4 * N);
+        run(l2, r2, ql, qr, N, 0, 0.5f, 1.0f, 0, 256);
+        sw = drop_pct(ql, l2, lat, W, N);
+        check(sw < 0.5, "crush at full, quiet input: no dropouts (%)", sw);
+        double lv = rms_db(ql, W, N) - rms_db(l2, W, N);
+        check(fabs(lv) < 3, "crush at full, quiet input: level kept (dB)", lv);
+        free(ql); free(qr);
 
-        /* fader down check */
-        fx_init(&E, SR);
-        memset(zl, 0, 4 * N); memset(zr, 0, 4 * N);
-        zl[100] = zr[100] = 0.5f;
-        fx_set_fader(&E, 2, 0.0f);
-        fx_process(&E, zl, zr, SR / 4);
-        check(1, "reverb: no old tail after the fader went down and up (dB)", -140.0);
-        free(zl); free(zr);
+        /* page 2: the sample-rate range: more of it, more aliasing */
+        fx_init(&E, SR); faders(0, 0.5f, 1.0f, 0); fx_set_param2(&E, 2, 0.0f);
+        memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N); fx_process(&E, l, r, N);
+        double a0 = residual_db(l, il, lat, W, N);
+        fx_init(&E, SR); faders(0, 0.5f, 1.0f, 0); fx_set_param2(&E, 2, 1.0f);
+        memcpy(l, il, 4 * N); memcpy(r, ir, 4 * N); fx_process(&E, l, r, N);
+        double a1 = residual_db(l, il, lat, W, N);
+        check(a1 - a0 > 3, "crush page 2: lower rate, more crushed (residual dB)", a1 - a0);
     }
 
-    /* ---- 4: limiter ---- */
+    /* every effect in (the filter centred, or a little either way): no dropouts against what the
+     * filter alone lets through */
     {
-        for (int i = 0; i < N; i++) { il[i] *= 1.9f; ir[i] *= 1.9f; } /* peaks at 0.95 */
-        run(il, ir, l, r, N, 0, 0.5f, 0, 0.0f, 256);
-        double r0 = rms_db(l, W, N), p0 = peak(l, r, N);
+        const float fp[3] = { 0.5f, 0.38f, 0.62f };
+        const char *nm[3] = { "all full, filter centred: no dropouts (%)",
+                              "all full, filter a little low-pass: no dropouts (%)",
+                              "all full, filter a little high-pass: no dropouts (%)" };
+        for (int k = 0; k < 3; k++) {
+            run(il, ir, l2, r2, N, 0, fp[k], 0, 0, 128);     /* the filter alone */
+            run(il, ir, l, r, N, 1.0f, fp[k], 1.0f, 1.0f, 128);
+            double sw = drop_pct(l, l2, 0, W, N);
+            check(sw < 0.5, nm[k], sw);
+            if (k == 0) wav_write(dir, "all_full.wav", l, r, N);
+        }
+    }
+
+    /* ---- 4: LA-2A ---- */
+    {
+        /* off: the input, exactly (the loop peaks at -6 dBFS, under the safety ceiling) */
+        run(il, ir, l2, r2, N, 0, 0.5f, 0, 0, 256);
+        run(il, ir, l, r, N, 0, 0.5f, 0, 0.01f, 256);
+        check(!memcmp(l, l2, 4 * N) && !memcmp(r, r2, 4 * N), "la-2a at 0: off (output = input)", 1);
+
+        /* more fader, more reduction */
+        double grs[3]; const float fp[3] = { 0.25f, 0.5f, 1.0f };
+        for (int k = 0; k < 3; k++) {
+            run(il, ir, l, r, N, 0, 0.5f, 0, fp[k], 256);
+            grs[k] = fx_gain_reduction_db(&E);
+        }
+        check(grs[0] < grs[1] && grs[1] < grs[2] && grs[0] > 0.5,
+              "la-2a: more peak reduction up the fader (dB at full)", grs[2]);
+
+        /* full: denser (lower crest factor), at about the same loudness */
+        run(il, ir, l2, r2, N, 0, 0.5f, 0, 0, 256);
         run(il, ir, l, r, N, 0, 0.5f, 0, 1.0f, 256);
-        double r1 = rms_db(l, W, N), p1 = peak(l, r, N);
-        check(p0 <= 0.9661 && p1 <= 0.9661, "limiter: peak at 0 and +12 dB drive", p1);
-        check(r1 - r0 > 6, "limiter: louder with the fader up (dB)", r1 - r0);
-        printf("%-58s %10.4f\n", "limiter: deepest reduction at +12 dB (dB)", 20 * log10(1 - E.limiter.meter));
-        wav_write(dir, "limiter_100.wav", l, r, N);
-        /* overs land on the ceiling smoothly: no step bigger than the input's own */
-        double d2i = fmax(max_d2(il, N), max_d2(ir, N)) * 3.98, d2o = fmax(max_d2(l, N), max_d2(r, N));
-        check(d2o < 2 * d2i, "limiter: no hard edges (vs the driven input)", d2o / d2i);
+        wav_write(dir, "la2a_100.wav", l, r, N);
+        /* a leveler evens out the loudness: a tone stepping between -6 and -26 dBFS every second
+         * comes out with the steps smaller */
+        double st_off = level_steps(0.0f, 0.5f), st_full = level_steps(1.0f, 0.5f);
+        check(st_full < st_off - 6, "la-2a at full: a 20 dB level step comes out (dB)", st_full);
+        double lv = rms_db(l, W, N) - rms_db(l2, W, N);
+        check(lv > -2 && lv < 4, "la-2a at full: loudness change (dB)", lv);
+        double d2i = fmax(max_d2(l2, N), max_d2(r2, N)), d2o = fmax(max_d2(l, N), max_d2(r, N));
+        check(d2o < 3 * d2i, "la-2a at full: no hard edges (vs off)", d2o / d2i);
+
+        /* page 2: limit levels harder than compress */
+        double sc = level_steps(0.7f, 0.0f), sl = level_steps(0.7f, 1.0f);
+        check(sl < sc - 1, "la-2a page 2: limit levels harder than compress (step dB)", sl);
+        printf("%-58s %10.4f\n", "la-2a page 2: the step with compress (dB)", sc);
+
+        /* the T4 cell: release after a long hard burst is slower than after a short one */
+        double rt[2];
+        for (int k = 0; k < 2; k++) {
+            int burst = k ? 4 * SR : SR / 10, n = burst + 8 * SR;
+            float *bl = malloc(4 * n), *br = malloc(4 * n);
+            for (int i = 0; i < n; i++)
+                bl[i] = br[i] = (i < burst ? 0.5f : 0.005f) * (float)sin(2 * M_PI * 440.0 * i / SR);
+            fx_init(&E, SR); faders(0, 0.5f, 0, 1.0f);
+            int t = -1;
+            for (int i = 0; i < n; i += 32) {
+                fx_process(&E, bl + i, br + i, 32);
+                float gr = E.limiter.gr_f > E.limiter.gr_s ? E.limiter.gr_f : E.limiter.gr_s;
+                if (i > burst && t < 0 && gr < 1.0f) t = i - burst;
+            }
+            rt[k] = t < 0 ? 1e9 : (double)t / SR;
+            free(bl); free(br);
+        }
+        printf("%-58s %10.4f\n", "la-2a: release to 1 dB after a 0.1 s burst (s)", rt[0]);
+        check(rt[1] > 2 * rt[0], "la-2a: release after a 4 s burst, slower (s)", rt[1]);
+
+        /* fader back down: off again within a second, then exactly the input */
+        {
+            int n = 4 * SR;
+            fx_init(&E, SR); faders(0, 0.5f, 0, 1.0f);
+            memcpy(l, il, 4 * n); memcpy(r, ir, 4 * n);
+            fx_process(&E, l, r, SR);
+            fx_set_fader(&E, 3, 0.0f);
+            fx_process(&E, l + SR, r + SR, SR);
+            int off = !E.limiter.active;
+            fx_process(&E, l + 2 * SR, r + 2 * SR, n - 2 * SR);
+            for (int i = 2 * SR + lat; i < n; i++) if (l[i] != il[i - lat]) { off = 0; break; }
+            check(off, "la-2a: fader down, off within 1 s and the input exactly", off);
+        }
+
+        /* the safety ceiling, with the LA-2A off and at full: a loud input stays under it */
+        for (int i = 0; i < N; i++) { l2[i] = il[i] * 2.4f; r2[i] = ir[i] * 2.4f; }  /* +1.6 dBFS */
+        run(l2, r2, l, r, N, 0, 0.5f, 0, 0.0f, 256);
+        double p0 = peak(l, r, N);
+        double d2a = fmax(max_d2(l2, N), max_d2(r2, N)), d2b = fmax(max_d2(l, N), max_d2(r, N));
+        run(l2, r2, l, r, N, 0, 0.5f, 0, 1.0f, 256);
+        double p1 = peak(l, r, N);
+        check(p0 <= 0.9661 && p1 <= 0.9661, "safety ceiling: peak at LA-2A off and full", fmax(p0, p1));
+        check(d2b < 2 * d2a, "safety ceiling: no hard edges (vs the input)", d2b / d2a);
     }
 
     if (argc > 6) {
