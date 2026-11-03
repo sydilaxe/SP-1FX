@@ -64,7 +64,7 @@ jobs:
           PY
           # and it fits: RAM used, from the build
           grep -q "CONFIG_BOARD_STEM_PLAYER=y" sp-1fx/build/firmware/zephyr/.config
-      - name: CPU estimate (Cortex-M4, every effect fully in)
+      - name: CPU estimate (Cortex-M4 at 48 kHz, every effect fully in)
         run: |
           pip install unicorn capstone
           ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1fx/tools/bench_m4.py -v | tee bench.txt
@@ -92,12 +92,14 @@ jobs:
           grep -q "^PASS: 0 failed" $r
           # the sound's promises
           grep -q "^blocks of 256 and of 1..300: same output .* ok" $r
-          grep -q "^rest: noise and aliasing on a -6 dBFS 1 kHz tone .* ok" $r
-          grep -q "^rest: a 15 kHz tone is gone, no alias .* ok" $r
+          grep -q "^rest: bit-exact input at the stated latency .* ok" $r
+          grep -q "^rest: an 18 kHz tone passes (full bandwidth) .* ok" $r
           grep -q "^full chain: peak under the -0.3 dBFS ceiling .* ok" $r
           grep -q "^sweep all faders: no clicks .* ok" $r
           grep -q "^filter: flat anywhere in the middle fifth .* ok" $r
-          grep -q "^reverb: no old tail after the fader went down and up .* ok" $r
+          grep -q "^dub: loudness change, full vs off .* ok" $r
+          grep -q "^all full, filter centred: no dropouts .* ok" $r
+          grep -q "^la-2a at 0: off (output = input) .* ok" $r
       - uses: actions/upload-artifact@v4
         if: always()
         with:

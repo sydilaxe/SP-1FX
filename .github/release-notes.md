@@ -8,21 +8,24 @@ firmware that runs on the SP-1, but this binary has not been on hardware yet.
 TRACK 4** while you plug the SP-1 in (the four track lights come on), choose `sp1fx.bin`, flash, then unplug
 and plug back in. The same plug-in hold always gets back to the bootloader, whatever firmware is on it.
 
-**The faders**, in the order the sound passes through them:
-- **1 DUB:** 70s dub reggae: a big low end, a dark top, tape wow and flutter, vinyl hiss, ticks and pops,
-  punchy compression and tape saturation. Down is off.
-- **2 FILTER:** the middle fifth is flat; up sweeps a high-pass, down a low-pass, resonance growing toward
-  the ends.
-- **3 REVERB:** an organic reverb, louder, bigger and darker as it goes up (to about 5 s). Down is dry.
-- **4 LIMITER:** a mastering limiter, always on at -1 dBFS; up drives into it, to +12 dB.
+**The faders**, in the order the sound passes through them (each has a second parameter on page 2):
+- **1 DUB:** 1970s dub warmth: a big low end, a dark top, tape wow and flutter, gentle glue compression
+  and tape saturation, level-matched so it never gets louder. Down is off. Page 2: wobble speed.
+- **2 FILTER:** the middle fifth is flat; up sweeps a high-pass, down a low-pass. Page 2: resonance.
+- **3 CRUSH:** fewer bits and a lower sample rate; quiet passages are crushed, never dropped. Down is off.
+  Page 2: sample-rate range.
+- **4 LA-2A:** an optical leveler: up adds peak reduction (with makeup). Down is off. Page 2: compress
+  to limit.
 
-**Buttons:** TRACK 1-4 switch each effect off and on, PLAY bypasses all four, VOL + / - set the volume
-(3 dB steps), hold FUNCTION to power on (1.5 s) or off (2.5 s), hold TRACK 1 + 4 for 3 s to restart into the
-bootloader.
+A safety ceiling at -1 dBFS stays on after the four and only acts on overs.
 
-**The sound:** a little warm and lo-fi, cleanly: gentle tape saturation and a slight treble dip, and the
-effects run at 24 kHz between two steep half-band filters, so the top rolls off softly above 11 kHz with no
-grit (noise and aliasing below -125 dB).
+**Buttons:** FWD / RWD switch to page 2 / page 1 (a parameter picks up when its fader reaches it, so
+nothing jumps), TRACK 1-4 switch each effect off and on, PLAY bypasses all four, VOL + / - set the
+volume (3 dB steps), hold FUNCTION to power on (1.5 s) or off (2.5 s), hold TRACK 1 + 4 for 3 s to
+restart into the bootloader.
+
+**The sound:** full bandwidth: 48 kHz / 24-bit in and out, 32-bit float inside. With every fader at
+rest the output is the input, bit for bit, 1.3 ms later.
 
 **If something is wrong**, open the SP-1's USB serial port: a status line a second shows the faders, the
 USB stream, the audio load (`blk=`, microseconds per 2.67 ms block) and the last crash.

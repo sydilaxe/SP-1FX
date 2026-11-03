@@ -12,34 +12,44 @@ the four faders, and hear it on headphones or the speaker.
 
 ## The effects
 
-| Fader | Effect | Down | Up |
-|---|---|---|---|
-| 1 | **Dub** | off | 70s dub: big low end, a dark top, tape wow and flutter, vinyl hiss, ticks and pops, punchy bus compression and tape saturation |
-| 2 | **Filter** | low-pass, sweeping down | high-pass, sweeping up; the middle fifth of the fader is flat, resonance grows toward the ends |
-| 3 | **Reverb** | dry | an organic reverb (a modulated 8-line feedback delay network): more, bigger and darker as it goes up, up to about 5 s |
-| 4 | **Limiter** | 0 dB drive | +12 dB of drive into a mastering limiter (always on: 1 ms look-ahead, -1 dBFS ceiling) |
+Each fader has a second parameter on page 2 (see Controls).
 
-The whole thing sounds a little warm and lo-fi, cleanly: a gentle tape saturation and a slight
-treble dip at the input, then the effects run at 24 kHz between two half-band filters (flat to
-11 kHz, -72 dB at 13 kHz, below -140 dB from 14 kHz). Audio stays 24-bit in and out; inside it is
-32-bit floating point.
+| Fader | Effect | Down | Up | Page 2 |
+|---|---|---|---|---|
+| 1 | **Dub** | off | 1970s dub warmth: a big low end, a dark top (down to 4.7 kHz), tape wow and flutter, gentle 2:1 glue compression and tape saturation. Level-matched: it never gets louder | tape wobble speed |
+| 2 | **Filter** | low-pass, sweeping down from 20 kHz | high-pass, sweeping up to 6 kHz; the middle fifth of the fader is flat | resonance |
+| 3 | **Crush** | off | fewer bits (16 down to 4) and a lower sample rate (48 kHz down to 2 kHz). The bit steps follow the signal's level, so quiet passages are crushed too instead of dropping out | sample-rate range |
+| 4 | **LA-2A** | off | an optical leveling amplifier: more peak reduction (with makeup gain) as it goes up. About 10 ms attack; release in two stages, about half back in 60 ms and the rest over 0.5 to 2 s, longer after long, hard passages | compress (3:1) to limit (10:1) |
+
+After the four effects, a **safety ceiling** at -1 dBFS (1 ms look-ahead) is always on. It only
+acts on overs, to protect the speaker and headphones.
+
+**Full bandwidth, 24-bit:** audio is 48 kHz / 24-bit in and out, and the effects run at 48 kHz in
+32-bit floating point. There is no colouring stage: with every fader at rest the output is the
+input, bit for bit, 64 samples (1.3 ms) later.
 
 ## Controls
 
 | | |
 |---|---|
-| Faders 1-4 | the effects |
+| Faders 1-4 | the effects (page 1) or their second parameters (page 2) |
+| FWD (>>) | page 2 |
+| RWD (<<) | page 1 |
 | TRACK 1-4 | switch that effect off and on (it glides to rest and back) |
-| PLAY | bypass: all effects off and on (the warm stage and the limiter stay) |
+| PLAY | bypass: all effects glide to rest and back (the safety ceiling stays) |
 | VOL + / VOL - | output volume, 3 dB steps |
 | FUNCTION, hold 1.5 s | power on |
 | FUNCTION, hold 2.5 s | power off |
 | TRACK 1 + TRACK 4, hold 3 s | restart into the bootloader, for flashing |
 
-Lights: the track lights show how far each effect is in (a faint glow when it's switched off);
-the four status lights show the limiter's gain reduction (0.5, 2, 4 and 8 dB), the volume for a
-second after you change it, and breathe slowly in bypass. Plug in headphones and the speaker
-turns off.
+**Pick-up:** after a page change, a parameter keeps its value until its fader reaches it (or
+sweeps past it), so nothing jumps. Its track light blinks until then.
+
+Lights: on page 1 the track lights show how far each effect is in (a faint glow when it's switched
+off); on page 2 they show the second parameters. For 0.6 s after FWD or RWD the status lights show
+the page (left pair = page 1, right pair = page 2). Otherwise they show the LA-2A's gain reduction
+(0.5, 2, 4 and 8 dB, the fourth blinking while on page 2), the volume for a second after you
+change it, and breathe slowly in bypass. Plug in headphones and the speaker turns off.
 
 ## Flashing and getting back
 
@@ -60,13 +70,15 @@ at all, step 2's plug-in hold still reaches the bootloader.
 Open the SP-1's USB serial port (any baud rate) for a line a second:
 `f=` fader readings, `usb=` streaming, `fill=` the input buffer, `under= over=` buffer
 under/overruns, `blk=last/max us` the time one 2.67 ms audio block takes (the CPU check: it must
-stay well under 2667), `hp=` headphones, `gr=` limiter reduction, `flt=` a crash from the last
-boot. If something is wrong on the hardware, this line is the thing to send.
+stay well under 2667), `hp=` headphones, `gr=` gain reduction, `flt=` a crash from the last
+boot. If something is wrong on the hardware, this line is the thing to send. If the filter's flat
+zone doesn't sit at the fader's centre, send the `f=` readings with the faders at the bottom,
+middle and top.
 
 ## CPU and memory
 
-- RAM: about 91 KB of 256 KB (the engine is about 55 KB, mostly the reverb).
-- CPU, worst case (every effect fully in, full-scale noise): about 70% of the 64 MHz Cortex-M4,
+- RAM: about 37 KB of 256 KB.
+- CPU, worst case (every effect fully in, full-scale noise): about 62% of the 64 MHz Cortex-M4,
   estimated by `tools/bench_m4.py`, which runs the engine built for the M4 in an emulator and
   counts cycles from the M4's instruction timings. The real figure is the status line's `blk=`.
 
@@ -84,7 +96,7 @@ artifacts.
 | Path | |
 |---|---|
 | `fx/` | the effects engine: plain C, float, no libm, no heap; runs the same on the host and the SP-1 |
-| `test/` | host checks (sound, block-size independence, clicks, aliasing, ceilings) and renders |
+| `test/` | host checks (bit-exact rest, bandwidth, block-size independence, clicks, dropouts, ceilings, the LA-2A's leveling and release) and renders |
 | `firmware/` | Zephyr application: USB audio (UAC2), I2S, codecs, faders, buttons, lights, power |
 | `boards/` | the SP-1 board definition |
 | `tools/bench_m4.py` | the CPU estimate |
@@ -97,4 +109,3 @@ artifacts.
   `firmware/LICENSE-sp1-tape-looper`.
 - [timknapen/SP-1-dev](https://github.com/timknapen/SP-1-dev): the SP-1's pinout, peripherals and
   bootloader documentation.
-- The half-band filters use the polyphase IIR design from Laurent de Soras' HIIR.

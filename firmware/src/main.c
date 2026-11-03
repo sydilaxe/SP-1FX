@@ -2,21 +2,27 @@
  *
  * Audio in:  USB-C, class compliant (UAC2), 48 kHz / 24-bit stereo, from a computer or phone.
  * Audio out: headphones (CS42L42) or, with nothing plugged in, the speaker (TAS2505), 24-bit.
- * In between, fx/fx.c: one effect per fader (DUB, FILTER, REVERB, LIMITER).
+ * In between, fx/fx.c at 48 kHz: one effect per fader (DUB, FILTER, CRUSH, LA-2A), then a
+ * safety ceiling.
  *
  * Controls
  *   faders 1-4        the four effects (see fx/fx.h)
+ *   FWD (>>) / RWD (<<)  page 2 / page 1. Page 2 puts each effect's second parameter on its
+ *                     fader. After a page change a parameter keeps its value until its fader
+ *                     reaches it (pick-up), so nothing jumps.
  *   TRACK 1-4         that effect off/on (it glides to rest and back to its fader)
- *   PLAY              bypass on/off (the effects glide to rest; the limiter stays as a guard)
+ *   PLAY              bypass on/off (the effects glide to rest; the safety ceiling stays)
  *   VOL + / VOL -     output volume, 3 dB steps
  *   FUNCTION, hold    power on (1.5 s) / power off (2.5 s)
  *   TRACK 1 + 4, hold 3 s: reset into the bootloader for flashing
  *
  * Lights
- *   track lights      how far each effect is in (filter: distance from the centre); a faint
- *                     glow when that effect is switched off
- *   status lights     limiter gain reduction (0.5, 2, 4, 8 dB); volume for a second after a change;
- *                     all four slowly breathing = bypass
+ *   track lights      page 1: how far each effect is in (filter: distance from the centre); a
+ *                     faint glow when that effect is switched off. Page 2: each second
+ *                     parameter; blinking until its fader picks it up
+ *   status lights     LA-2A gain reduction (0.5, 2, 4, 8 dB), the fourth blinking on page 2;
+ *                     volume for a second after a change; the page for 0.6 s after a change
+ *                     (1+2 = page 1, 3+4 = page 2); all four slowly breathing = bypass
  *
  * The platform code (power, codecs, I2S clocking, the USB audio class and its feedback, the
  * bootloader rules) follows chattock/sp1-tape-looper (MIT, see LICENSE-sp1-tape-looper), which
@@ -532,7 +538,7 @@ static struct k_thread audio_tcb;
 static volatile bool g_audio_started;
 static int g_i2s_rc = 1;
 
-static fx_engine g_fx;                       /* ~104 KB, mostly the reverb */
+static fx_engine g_fx;                       /* a few KB of state */
 static volatile float g_fader[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
 static volatile float g_param2[4] = { 0.5f, 0.5f, 0.5f, 0.5f };
 static volatile int g_page;                  /* 0: Main amounts, 1: Secondary parameters */
@@ -606,24 +612,14 @@ static void audio_block(int32_t *out)
 		}
 	}
 
-	if (g_bypass) {
-		/* Zero-overhead true straight-through bypass: 0% DSP CPU, bit-transparent audio */
-		float target = g_muted ? 0.0f : fx_db2lin((float)g_vol_db);
-		float step = (target - g_vol_lin) * (1.0f / BLK_FRAMES);
-		for (int i = 0; i < BLK_FRAMES; i++) {
-			g_vol_lin += step;
-			out[2 * i] = to_s24(bufl[i] * g_vol_lin);
-			out[2 * i + 1] = to_s24(bufr[i] * g_vol_lin);
-		}
-		g_vol_lin = target;
-		return;
-	}
-
+	/* bypass and the track buttons send effects to rest through the engine, so they glide out
+	 * and back; at rest the engine passes the input exactly (only delayed), and the latency never
+	 * changes, so switching never clicks */
 	static float last_f[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 	static float last_p2[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
 	static const float rest[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
 	for (int k = 0; k < 4; k++) {
-		float f = g_fx_off[k] ? rest[k] : g_fader[k];
+		float f = (g_bypass || g_fx_off[k]) ? rest[k] : g_fader[k];
 		if (f != last_f[k]) {
 			fx_set_fader(&g_fx, k, f);
 			last_f[k] = f;
@@ -886,6 +882,11 @@ int main(void)
 	leds_off();
 
 	float fpos[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
+	/* pick-up: after a page change a fader only takes over its parameter once it reaches the
+	 * value (or passes it); until then the parameter stays put. side[] is which side of the value
+	 * the fader started on. */
+	bool caught[4] = { true, true, true, true };
+	int side[4] = { 0, 0, 0, 0 };
 	int64_t pwr_t = -1, dfu_t = -1, vol_show_until = 0, page_show_until = 0, hp_next = 0, stat_next = 0;
 	int last_vol = VOL_NONE, hp_votes = 0, play_n = 0, trk_cand = -1, trk_n = 0, odd_n = 0;
 	bool play_armed = false, chord = false;
@@ -903,11 +904,15 @@ int main(void)
 				float p = (float)g_adc[CH_FADER0 + k] / FADER_TOP;
 				p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
 				fpos[k] = first ? p : fpos[k] + 0.35f * (p - fpos[k]);
-				if (g_page == 0) {
-					g_fader[k] = fpos[k];
-				} else {
-					g_param2[k] = fpos[k];
+				volatile float *dst = g_page == 0 ? &g_fader[k] : &g_param2[k];
+				if (!caught[k]) {
+					float d = fpos[k] - *dst;
+					int sd = d < 0.0f ? -1 : 1;
+					if (d < 0.03f && d > -0.03f) caught[k] = true;
+					else if (side[k] == 0) side[k] = sd;
+					else if (sd != side[k]) caught[k] = true;   /* swept past it */
 				}
+				if (caught[k]) *dst = fpos[k];
 			}
 			first = false;
 
@@ -951,13 +956,11 @@ int main(void)
 				if (vol == VOL_UP && g_vol_db < 0) g_vol_db += 3;
 				if (vol == VOL_DOWN && g_vol_db > -60) g_vol_db -= 3;
 				if (vol == VOL_UP || vol == VOL_DOWN) vol_show_until = now + 1000;
-				if (vol == VOL_FWD) {
-					g_page = 1; /* switch to secondary parameter page */
-					page_show_until = now + 600;
-				}
-				if (vol == VOL_RWD) {
-					g_page = 0; /* switch back to main amount page */
-					page_show_until = now + 600;
+				int np = vol == VOL_FWD ? 1 : vol == VOL_RWD ? 0 : g_page;
+				if (vol == VOL_FWD || vol == VOL_RWD) page_show_until = now + 600;
+				if (np != g_page) {
+					g_page = np;
+					for (int k = 0; k < 4; k++) { caught[k] = false; side[k] = 0; }
 				}
 			}
 			last_vol = vol;
@@ -992,16 +995,23 @@ int main(void)
 			for (int i = 0; i < 4; i++) { led_set(g_sta_duty, i, b); led_set(g_trk_duty, i, 0); }
 		} else {
 			if (g_page == 0) {
-				/* Main Page: the filter's light: dark across its flat middle (0.4..0.6) */
-				float fd = fpos[1] < 0.5f ? 0.5f - fpos[1] : fpos[1] - 0.5f;
+				/* page 1: the filter's light is dark across its flat middle (0.4..0.6) */
+				float f1 = g_fader[1];
+				float fd = f1 < 0.5f ? 0.5f - f1 : f1 - 0.5f;
 				fd = fd < 0.1f ? 0.0f : (fd - 0.1f) / 0.4f;
-				float amt[4] = { fpos[0], fd, fpos[2], fpos[3] };
-				for (int i = 0; i < 4; i++)
-					led_set(g_trk_duty, i, g_fx_off[i] ? 6 : (int)(amt[i] * amt[i] * LED_DIM));
+				float amt[4] = { g_fader[0], fd, g_fader[2], g_fader[3] };
+				for (int i = 0; i < 4; i++) {
+					int v = g_fx_off[i] ? 6 : (int)(amt[i] * amt[i] * LED_DIM);
+					if (!caught[i] && tick % 30u < 10u) v = 0;   /* waiting for pick-up */
+					led_set(g_trk_duty, i, v);
+				}
 			} else {
-				/* Secondary Page: show secondary parameters (e.g. resonance for filter) */
-				for (int i = 0; i < 4; i++)
-					led_set(g_trk_duty, i, (int)(g_param2[i] * g_param2[i] * LED_DIM));
+				/* page 2: each second parameter */
+				for (int i = 0; i < 4; i++) {
+					int v = 4 + (int)(g_param2[i] * g_param2[i] * LED_DIM);
+					if (!caught[i] && tick % 30u < 10u) v = 0;   /* waiting for pick-up */
+					led_set(g_trk_duty, i, v);
+				}
 			}
 
 			if (now < page_show_until) {
@@ -1017,7 +1027,7 @@ int main(void)
 				int lv = (g_vol_db + 60) * 4 / 60;   /* 0..4 */
 				for (int i = 0; i < 4; i++) led_set(g_sta_duty, i, i < lv ? LED_DIM : 0);
 			} else {
-				float gr = -fx_lin2db(1.0f - g_fx.limiter.meter + 1e-6f);
+				float gr = fx_gain_reduction_db(&g_fx);
 				static const float thr[4] = { 0.5f, 2.0f, 4.0f, 8.0f };
 				for (int i = 0; i < 4; i++) {
 					int on = gr >= thr[i] ? LED_DIM : 0;

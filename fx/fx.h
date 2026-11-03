@@ -1,21 +1,26 @@
-/* SP-1 multi-effects engine: four effects in series, one per fader.
+/* SP-1 multi-effects engine: four effects in series, one per fader, each with a second
+ * parameter on page 2.
  *
- *   fader 1  DUB      70s dub reggae: big low end, dark top, tape wow and flutter, vinyl dust,
- *                     punchy bus compression and tape saturation. Down = off, up = more.
+ *   fader 1  DUB      70s dub: big low end, dark top, tape wow and flutter, bus compression and
+ *                     tape saturation. Down = off, up = more.            Page 2: tape wobble speed.
  *   fader 2  FILTER   the middle fifth is flat; down sweeps a low-pass down, up a high-pass up.
- *   fader 3  REVERB   organic reverb (modulated feedback delay network). Down = dry, up = more
- *                     and longer.
- *   fader 4  LIMITER  mastering limiter, always on at -0.3 dBFS; the fader drives into it
- *                     (0 to +12 dB).
+ *                                                                        Page 2: resonance.
+ *   fader 3  CRUSH    bit and sample-rate reducer. The bit depth follows the signal's level, so
+ *                     quiet passages are crushed too instead of dropping out.
+ *                     Down = off, up = fewer bits and a lower rate.      Page 2: sample-rate range.
+ *   fader 4  LA-2A    optical leveling amplifier. Down = off, up = more peak reduction (with
+ *                     makeup gain). Slow optical attack, two-stage program-dependent release.
+ *                                                                        Page 2: compress -> limit.
  *
- * The sound: warm and a little lo-fi, but clean. In and out at 48 kHz; at the input a warm stage
- * (gentle tape saturation, a slight treble dip), then the effects run at 24 kHz between two
- * polyphase IIR half-band filters (flat to 11 kHz, -72 dB at 13 kHz, below -140 dB from 14 kHz):
- * a soft top without grit, and half the CPU.
+ * After the four, an always-on safety ceiling (-1 dBFS, 1 ms look-ahead) that only acts on
+ * overs: it protects the speaker and headphones and is otherwise inaudible.
  *
- * Float, stereo, any block size: parameters move every FX_CHUNK core frames counted from the start,
- * so the output does not depend on how the audio is cut into blocks. No libm, no doubles, no heap:
- * an fx_engine is about 55 KB and should be a static. */
+ * Full bandwidth: everything runs at the outside rate (48 kHz) in 32-bit float. With every fader
+ * at rest the output is the input, bit for bit, fx_latency() frames later.
+ *
+ * Float, stereo, any block size: parameters move every FX_CHUNK frames counted from the start, so
+ * the output does not depend on how the audio is cut into blocks. No libm, no doubles, no heap:
+ * an fx_engine should be a static. */
 #ifndef SP1_FX_H
 #define SP1_FX_H
 
@@ -23,9 +28,9 @@
 #include "fx_math.h"
 
 #define FX_SLOTS 4
-#define FX_CHUNK 16   /* core frames (24 kHz) between parameter updates */
+#define FX_CHUNK 32   /* frames (48 kHz) between parameter updates: 0.67 ms */
 
-enum { FX_DUB, FX_FILTER, FX_CRUSH, FX_LIMITER, FX_REVERB = FX_CRUSH };
+enum { FX_DUB, FX_FILTER, FX_CRUSH, FX_LIMITER };
 
 /* ---- 1: dub ---- */
 #define DUB_DL 64      /* wow/flutter delay line, power of two */
@@ -38,98 +43,83 @@ typedef struct {
     float wow_c, wow_s, wow_rc, wow_rs, flt_c, flt_s, flt_rc, flt_rs;
     float wow_depth, flt_depth;
     float hp_c;
-    fx_svf shelf, cut, pres, lp;
-    fx_svf_state st[2][5];
+    fx_svf shelf, cut, lp;
+    fx_svf_state st[2][5];  /* [0] rumble, [1] shelf, [2] cut, [4] top */
     float env, att, rel, thr, slope, knee, makeup;
     float sc_lp[2], sc_c;   /* the detector's high-pass (sidechain): one-poles at 150 Hz */
     float drive, inv_drive, sat_mix, bias, bias_out, gain;
     float dc_x[2], dc_y[2], dc_r;
-    uint32_t rng, rng_c[2];
-    float dg;           /* the gain step between those */
-    int cphase;         /* frames counted for the compressor's every-fourth-frame gain */
-    float hiss, hiss_c, hiss_lp[2];
-    uint32_t tick_th;   /* a tick when a 32-bit random number falls under this */
-    float tick_p, tick_amp, tick_env[2], tick_dec;
-    float pop_p, pop_amp, pop_env, pop_dec, pop_lp, pop_c;
+    float dg;               /* the compressor's gain step per frame */
+    int cphase;             /* frames counted for the compressor's every-fourth-frame gain */
     float trim;
-    float speed_mod;           /* secondary param: tape modulation speed (0..1, default 0.5) */
-    int dust_on; /* 1; the tests turn it off to look for clicks */
+    float speed_mod;        /* page 2: tape wobble speed (0..1, default 0.5) */
 } fx_dub;
 
 /* ---- 2: filter ---- */
 typedef struct {
     float pos, gate, gate_target;
     int mode, mode_target; /* 0 high-pass, 1 low-pass */
-    float res;             /* secondary param: resonance amount (0..1, default 0.5) */
+    float res;             /* page 2: resonance amount (0..1, default 0.5) */
     fx_svf s1, s2;
     fx_svf_state st[2][2];
 } fx_filter;
 
-/* ---- 3: bit reducer (sample rate & bit depth crusher) ---- */
+/* ---- 3: bit and sample-rate reducer ---- */
 typedef struct {
     float amt, wet;
-    float bits;             /* effective bit depth: 16 down to 3 */
-    float q_step;           /* quantization step */
-    float inv_q_step;
-    float rate_ratio;       /* downsample ratio: 1.0 (24kHz) down to ~0.06 (1.5kHz) */
-    float rate_mod;         /* secondary param: clock rate override (0..1, default 0.5) */
-    float hold_l, hold_r;   /* sample-and-hold accumulator */
+    float q_step, inv_q_step; /* quantizer step for a signal normalised to its level */
+    float rate_ratio;         /* hold clock / sample rate: 1 down to about 1/24 */
+    float rate_mod;           /* page 2: sample-rate range (0..1, default 0.5) */
+    float env, env_rel;       /* the level the quantizer follows (stereo-linked peak) */
+    float hold_l, hold_r;     /* sample-and-hold */
     float phase;
     float gate, gate_target;
 } fx_bitcrush;
 
-typedef fx_bitcrush fx_reverb; /* backward compatibility alias */
-
-/* ---- 4: LA-2A optical leveling amplifier ---- */
-#define LIM_LA 24      /* look-ahead: 1 ms at 24 kHz; latency LIM_LA - 1 core frames */
-#define LIM_SEG 8      /* segment size for detector smoothing */
+/* ---- 4: LA-2A optical leveler, then the safety ceiling ---- */
+#define LIM_LA 48      /* safety look-ahead: 1 ms, and its latency */
+#define LIM_SEG 8      /* segment size for the look-ahead peak hold */
 #define LIM_NSEG (LIM_LA / LIM_SEG)
 
 typedef struct {
-    float amt;                /* slider 4 position: Peak Reduction (0 = off, 1 = +12 dB) */
-    int active;               /* 0 when bypassed (Peak Reduction at 0), 1 when active */
-    float rel_mod;            /* secondary param: Mode (0 = Compress 3.5:1, 1 = Limit 18:1) */
-    float drive, drive_target, dstep, ceiling;
+    /* LA-2A */
+    float pos;                /* fader: peak reduction 0..1 (0 = off) */
+    float amt;                /* the same, smoothed */
+    float mode;               /* page 2: 0 = compress (3:1), 1 = limit (10:1), default 0.5 */
+    float thr, slope, knee, makeup_db, fade, tube;
+    float det, det_att, det_rel;      /* fast rectifier feeding the optical cell */
+    float gr_f, gr_s;         /* the cell, dB of reduction: fast part, slow (memory) part */
+    float c_att, c_rel_f, c_chg_s, c_rel_s;   /* per 4 frames */
+    float g, dg;              /* applied gain, glided between the every-fourth-frame updates */
+    int cphase;
+    int active;
+    /* safety ceiling */
+    float ceiling;
     float dl[2][LIM_LA];
-    float seg[LIM_NSEG];      /* segmented detector state */
-    float cur, held;          /* peak detector tracking */
-    int si, sn;
-    float box[LIM_LA], box_sum;
-    int pos;
-    float gr;                 /* current optical gain reduction */
-    float rel_fast, rel_slow; /* T4B dual-stage release coefficients */
-    float opt_mem;            /* electro-luminescent memory */
-    float meter;              /* deepest reduction since last read, 0..1 */
+    float seg[LIM_NSEG];      /* each segment's needed reduction, a ring */
+    float acc_pk;             /* the peak of the segment coming in */
+    int si, sn, pos_dl;
+    float sgr, s_rel;         /* reduction at the last segment point, its release */
+    float sg, sg_step;        /* gain now, and its step per frame */
+    float meter;              /* deepest total reduction since last read, 0..1 (1 - gain) */
 } fx_limiter;
 
-#define HB_C 10        /* half-band allpass coefficients */
-
 typedef struct {
-    float sr, cr;             /* outside rate (48 kHz), core rate (24 kHz) */
-    int phase;                /* core frames into the current chunk */
-    /* warm stage, at the outside rate */
-    float warm_lp[2], warm_c;
-    /* 48 -> 24 kHz: allpass states */
-    float dy[2][HB_C], dx0[2], dx1[2], dfirst[2];
-    int dodd;
-    /* 24 -> 48 kHz: the same, and the pair's second frame */
-    float uy[2][HB_C], ux0[2], ux1[2], usecond[2];
-    int uodd;
-    float fader[FX_SLOTS];    /* latest main positions (Page 0), 0..1 */
-    float param2[FX_SLOTS];   /* secondary page parameters (Page 1), 0..1 */
+    float sr;
+    int phase;                /* frames into the current chunk */
+    float fader[FX_SLOTS];    /* page 1 positions, 0..1 */
+    float param2[FX_SLOTS];   /* page 2 positions, 0..1 */
     fx_dub dub;
     fx_filter filter;
-    union {
-        fx_bitcrush crush;
-        fx_bitcrush reverb;
-    };
+    fx_bitcrush crush;
     fx_limiter limiter;
 } fx_engine;
 
 void fx_init(fx_engine *e, float sr);
-void fx_set_fader(fx_engine *e, int slot, float pos);   /* main pos 0..1 */
-void fx_set_param2(fx_engine *e, int slot, float pos);  /* secondary pos 0..1 */
+void fx_set_fader(fx_engine *e, int slot, float pos);   /* page 1, 0..1 */
+void fx_set_param2(fx_engine *e, int slot, float pos);  /* page 2, 0..1 */
 void fx_process(fx_engine *e, float *l, float *r, int n); /* in place */
 int fx_latency(const fx_engine *e);                       /* frames */
+float fx_gain_reduction_db(const fx_engine *e);           /* LA-2A + ceiling, from the meter */
 
 #endif
