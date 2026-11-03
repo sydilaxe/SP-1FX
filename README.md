@@ -78,9 +78,11 @@ middle and top.
 ## CPU and memory
 
 - RAM: about 37 KB of 256 KB.
-- CPU, worst case (every effect fully in, full-scale noise): about 62% of the 64 MHz Cortex-M4,
-  estimated by `tools/bench_m4.py`, which runs the engine built for the M4 in an emulator and
-  counts cycles from the M4's instruction timings. The real figure is the status line's `blk=`.
+- CPU, worst case (every effect fully in and every fader moving, full-scale noise): about 42% of
+  the 64 MHz Cortex-M4, estimated by `tools/bench_m4.py`, which runs the engine built for the M4
+  in an emulator and counts cycles from the M4's instruction timings. The estimate leaves out USB
+  interrupts, cache misses and pipeline stalls, which on the SP-1 add a good deal, so the engine
+  is kept well under half (CI fails it above 55%). The real figure is the status line's `blk=`.
 
 ## Building
 

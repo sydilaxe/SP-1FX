@@ -882,6 +882,9 @@ int main(void)
 	leds_off();
 
 	float fpos[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
+	/* what the engine gets: fpos with a small deadband, so a fader at rest sends exactly the
+	 * same value (ADC noise would otherwise make the engine recompute its filters all the time) */
+	float fheld[4] = { 0.0f, 0.5f, 0.0f, 0.0f };
 	/* pick-up: after a page change a fader only takes over its parameter once it reaches the
 	 * value (or passes it); until then the parameter stays put. side[] is which side of the value
 	 * the fader started on. */
@@ -904,15 +907,18 @@ int main(void)
 				float p = (float)g_adc[CH_FADER0 + k] / FADER_TOP;
 				p = p < 0.0f ? 0.0f : p > 1.0f ? 1.0f : p;
 				fpos[k] = first ? p : fpos[k] + 0.35f * (p - fpos[k]);
+				float q = fpos[k] > 0.996f ? 1.0f : fpos[k] < 0.004f ? 0.0f : fpos[k];
+				float dq = q - fheld[k];
+				if (first || dq > 0.003f || dq < -0.003f || q == 0.0f || q == 1.0f) fheld[k] = q;
 				volatile float *dst = g_page == 0 ? &g_fader[k] : &g_param2[k];
 				if (!caught[k]) {
-					float d = fpos[k] - *dst;
+					float d = fheld[k] - *dst;
 					int sd = d < 0.0f ? -1 : 1;
 					if (d < 0.03f && d > -0.03f) caught[k] = true;
 					else if (side[k] == 0) side[k] = sd;
 					else if (sd != side[k]) caught[k] = true;   /* swept past it */
 				}
-				if (caught[k]) *dst = fpos[k];
+				if (caught[k]) *dst = fheld[k];
 			}
 			first = false;
 

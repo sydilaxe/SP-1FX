@@ -28,31 +28,34 @@
 #include "fx_math.h"
 
 #define FX_SLOTS 4
-#define FX_CHUNK 32   /* frames (48 kHz) between parameter updates: 0.67 ms */
+#define FX_CHUNK 64   /* frames (48 kHz) between parameter updates: 1.3 ms */
 
 enum { FX_DUB, FX_FILTER, FX_CRUSH, FX_LIMITER };
 
 /* ---- 1: dub ---- */
-#define DUB_DL 64      /* wow/flutter delay line, power of two */
+#define DUB_DL 128     /* wow/flutter delay line, power of two; at least FX_CHUNK + DUB_CENTER */
 #define DUB_CENTER 16  /* its centre tap: the slot's latency in frames */
 
 typedef struct {
     float amt, gate, gate_target;
     int wpos;
     float dl[2][DUB_DL];
-    float wow_c, wow_s, wow_rc, wow_rs, flt_c, flt_s, flt_rc, flt_rs;
+    float wow_c, wow_s, wow_rc, wow_rs, flt_c, flt_s, flt_rc, flt_rs; /* rates: per chunk */
     float wow_depth, flt_depth;
+    float off, off_step;    /* the wobble, in frames: computed per chunk, ramped across it */
     float hp_c;
-    fx_svf shelf, cut, lp;
-    fx_svf_state st[2][5];  /* [0] rumble, [1] shelf, [2] cut, [4] top */
+    fx_bq shelf, cut, lp;
+    float hp_z[2];          /* the rumble high-pass */
+    fx_bq_state st[2][3];   /* [0] shelf, [1] cut, [2] top */
     float env, att, rel, thr, slope, knee, makeup;
     float sc_lp[2], sc_c;   /* the detector's high-pass (sidechain): one-poles at 150 Hz */
     float drive, inv_drive, sat_mix, bias, bias_out, gain;
     float dc_x[2], dc_y[2], dc_r;
     float dg;               /* the compressor's gain step per frame */
-    int cphase;             /* frames counted for the compressor's every-fourth-frame gain */
+    int cphase;             /* frames counted for the compressor's every-eighth-frame gain */
     float trim;
     float speed_mod;        /* page 2: tape wobble speed (0..1, default 0.5) */
+    float set_a, set_speed; /* the settings the coefficients were last made for */
 } fx_dub;
 
 /* ---- 2: filter ---- */
@@ -60,6 +63,8 @@ typedef struct {
     float pos, gate, gate_target;
     int mode, mode_target; /* 0 high-pass, 1 low-pass */
     float res;             /* page 2: resonance amount (0..1, default 0.5) */
+    float set_t, set_res;  /* the settings the coefficients were last made for */
+    int set_mode;
     fx_svf s1, s2;
     fx_svf_state st[2][2];
 } fx_filter;
@@ -79,7 +84,7 @@ typedef struct {
 /* ---- 4: LA-2A optical leveler, then the safety ceiling ---- */
 #define LIM_LA 48      /* safety look-ahead: 1 ms, and its latency */
 #define LIM_SEG 8      /* segment size for the look-ahead peak hold */
-#define LIM_NSEG (LIM_LA / LIM_SEG)
+#define LIM_NSEG (LIM_LA / LIM_SEG)   /* 6: fx.c has a weight table for it */
 
 typedef struct {
     /* LA-2A */
