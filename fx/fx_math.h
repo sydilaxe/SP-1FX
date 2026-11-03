@@ -65,6 +65,19 @@ static inline float fx_softclip(float x)
     return x - 0.14814815f * x * x * x;
 }
 
+/* |x| as its bit pattern: for magnitudes, integer order is float order, and an integer compare
+ * on the Cortex-M4 avoids the FPU-flags round trip (VCMP + VMRS) */
+static inline uint32_t fx_abs_bits(float x)
+{
+    union { float f; uint32_t u; } v = { x };
+    return v.u & 0x7fffffffu;
+}
+static inline float fx_from_bits(uint32_t u)
+{
+    union { uint32_t u; float f; } v = { u };
+    return v.f;
+}
+
 /* xorshift32: white noise in [-1, 1) and [0, 1) */
 static inline uint32_t fx_rng(uint32_t *s)
 {
@@ -89,6 +102,34 @@ static inline float fx_svf_tick(float a1, float a2, float a3, float m0, float m1
     *ic1 = 2.0f * v1 - *ic1;
     *ic2 = 2.0f * v2 - *ic2;
     return m0 * v0 + m1 * v1 + m2 * v2;
+}
+
+/* the core of a tick: updates the state, returns v1 (band) and v2 (low) */
+static inline void fx_svf_step(float a1, float a2, float a3, float *ic1, float *ic2, float v0,
+                               float *v1, float *v2)
+{
+    float v3 = v0 - *ic2;
+    *v1 = a1 * *ic1 + a2 * v3;
+    *v2 = *ic2 + a2 * *ic1 + a3 * v3;
+    *ic1 = 2.0f * *v1 - *ic1;
+    *ic2 = 2.0f * *v2 - *ic2;
+}
+
+/* low-pass: the low output alone */
+static inline float fx_svf_lp(float a1, float a2, float a3, float *ic1, float *ic2, float v0)
+{
+    float v1, v2;
+    fx_svf_step(a1, a2, a3, ic1, ic2, v0, &v1, &v2);
+    return v2;
+}
+
+/* high-pass (m0 = 1, m1 = -k, m2 = -1) */
+static inline float fx_svf_hp(float a1, float a2, float a3, float k, float *ic1, float *ic2,
+                              float v0)
+{
+    float v1, v2;
+    fx_svf_step(a1, a2, a3, ic1, ic2, v0, &v1, &v2);
+    return v0 - k * v1 - v2;
 }
 
 static inline float fx_svf_run(const fx_svf *c, fx_svf_state *s, float v0)
@@ -140,6 +181,52 @@ static inline void fx_svf_lowshelf(fx_svf *c, float hz, float q, float db, float
     float k = 1.0f / q;
     fx_svf_core(c, fx_svf_g(hz, sr) / fx_sqrtf(A), k);
     c->m0 = 1.0f; c->m1 = k * (A - 1.0f); c->m2 = A * A - 1.0f;
+}
+
+/* The same responses as direct-form biquads (transposed form II): 5 multiplies and 4 adds a
+ * frame instead of the state-variable filter's 9 and 7. For fixed or slowly moving settings; the
+ * state-variable filter stays where a filter sweeps fast. Built from the same analog prototype,
+ * H(s) = m0 + m1 s / D + m2 / D, D = s^2 + k s + 1, prewarped with g = tan(pi f / sr). */
+typedef struct { float b0, b1, b2, a1, a2; } fx_bq;
+typedef struct { float s1, s2; } fx_bq_state;
+
+static inline void fx_bq_from(fx_bq *c, float g, float k, float m0, float m1, float m2)
+{
+    float B2 = m0, B1 = m0 * k + m1, B0 = m0 + m2, g2 = g * g;
+    float inv = 1.0f / (1.0f + k * g + g2);
+    c->b0 = (B2 + B1 * g + B0 * g2) * inv;
+    c->b1 = 2.0f * (B0 * g2 - B2) * inv;
+    c->b2 = (B2 - B1 * g + B0 * g2) * inv;
+    c->a1 = 2.0f * (g2 - 1.0f) * inv;
+    c->a2 = (1.0f - k * g + g2) * inv;
+}
+
+static inline void fx_bq_lowpass(fx_bq *c, float hz, float q, float sr)
+{
+    fx_bq_from(c, fx_svf_g(hz, sr), 1.0f / q, 0.0f, 0.0f, 1.0f);
+}
+
+static inline void fx_bq_bell(fx_bq *c, float hz, float q, float db, float sr)
+{
+    float A = fx_exp2f(db * 0.08304820f);
+    float k = 1.0f / (q * A);
+    fx_bq_from(c, fx_svf_g(hz, sr), k, 1.0f, k * (A * A - 1.0f), 0.0f);
+}
+
+static inline void fx_bq_lowshelf(fx_bq *c, float hz, float q, float db, float sr)
+{
+    float A = fx_exp2f(db * 0.08304820f);
+    float k = 1.0f / q;
+    fx_bq_from(c, fx_svf_g(hz, sr) / fx_sqrtf(A), k, 1.0f, k * (A - 1.0f), A * A - 1.0f);
+}
+
+static inline float fx_bq_tick(float b0, float b1, float b2, float a1, float a2,
+                               float *s1, float *s2, float x)
+{
+    float y = b0 * x + *s1;
+    *s1 = b1 * x - a1 * y + *s2;
+    *s2 = b2 * x - a2 * y;
+    return y;
 }
 
 #endif

@@ -68,10 +68,10 @@ jobs:
         run: |
           pip install unicorn capstone
           ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-0.17.4 python3 sp-1fx/tools/bench_m4.py -v | tee bench.txt
-          # one core is 100%; keep the worst case clear of it
+          # one core is 100%; the estimate leaves out USB, cache misses and stalls, so keep it low
           pct=$(sed -n 's/.*: \([0-9]*\)% of one core.*/\1/p' bench.txt)
           echo "worst case: $pct% of one core"
-          test -n "$pct" && test "$pct" -le 80
+          test -n "$pct" && test "$pct" -le 55
       - uses: actions/upload-artifact@v4
         with:
           name: sp1fx-firmware

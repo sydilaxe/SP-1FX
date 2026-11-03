@@ -1,5 +1,6 @@
 /* Cortex-M4 cycle estimate for the effects: built for the M4F like the firmware, run in an
- * emulator by tools/bench_m4.py. Worst case: every effect in, a full-scale noise input. */
+ * emulator by tools/bench_m4.py. Worst case: every effect in, a full-scale noise input, and every
+ * fader moving (so every setting is recomputed each chunk). */
 #include "fx.h"
 
 static fx_engine E;
@@ -32,6 +33,13 @@ void bench_init(void)
 
 void bench_block(void)   /* one firmware block: 128 frames */
 {
+    static int t;
+    float w = (t++ & 1) ? 0.0f : 0.02f;    /* the faders move a little every block */
+    fx_set_fader(&E, 0, 1.0f - w);
+    fx_set_fader(&E, 1, 0.15f + w);
+    fx_set_fader(&E, 2, 1.0f - w);
+    fx_set_fader(&E, 3, 1.0f - w);
+    for (int k = 0; k < 4; k++) fx_set_param2(&E, k, 0.5f + w);
     fill();
     fx_process(&E, L, R, 128);
 }

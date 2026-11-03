@@ -62,8 +62,10 @@ static void dub_init(fx_dub *d, float sr)
     __builtin_memset(d, 0, sizeof *d);
     d->gain = 1.0f;
     d->speed_mod = 0.5f;
-    osc_init(&d->wow_c, &d->wow_s, &d->wow_rc, &d->wow_rs, 0.55f, 0.0f, sr);
-    osc_init(&d->flt_c, &d->flt_s, &d->flt_rc, &d->flt_rs, 7.3f, 1.0f, sr);
+    d->set_a = -1.0f;
+    /* the wow and flutter oscillators step once per chunk; the tap ramps between */
+    osc_init(&d->wow_c, &d->wow_s, &d->wow_rc, &d->wow_rs, 0.55f * FX_CHUNK, 0.0f, sr);
+    osc_init(&d->flt_c, &d->flt_s, &d->flt_rc, &d->flt_rs, 7.3f * FX_CHUNK, 1.0f, sr);
     d->att = sample_coef(0.004f, sr);   /* 4 ms: transients punch through */
     d->rel = sample_coef(0.080f, sr);
     d->knee = 5.0f;
@@ -78,15 +80,18 @@ STAGE static void dub_control(fx_dub *d, float pos, float sr)
     d->gate_target = pos < DUB_DEAD ? 0.0f : 1.0f;
     if (d->gate == 0.0f && d->gate_target == 0.0f) return;   /* off: nothing to set up */
     float a = d->amt;
+    if (a == d->set_a && d->speed_mod == d->set_speed) goto wobble;   /* parked: nothing new */
+    d->set_a = a;
+    d->set_speed = d->speed_mod;
 
     /* page 2: tape wobble speed, 0.4x to 1.6x (wow 0.22 to 0.88 Hz) */
-    osc_rate(&d->wow_rc, &d->wow_rs, 0.55f * (0.4f + 1.2f * d->speed_mod), sr);
+    osc_rate(&d->wow_rc, &d->wow_rs, 0.55f * (0.4f + 1.2f * d->speed_mod) * FX_CHUNK, sr);
 
     /* EQ: fat low end, de-mudded mid, a dark top */
     d->hp_c = 2.0f * FX_PI * (20.0f + 15.0f * a) / sr;
-    fx_svf_lowshelf(&d->shelf, 95.0f, 0.75f, 6.5f * a, sr);
-    fx_svf_bell(&d->cut, 300.0f, 0.9f, -2.5f * a, sr);
-    fx_svf_lowpass(&d->lp, 11500.0f * fx_exp2f(-1.30f * a), 0.65f, sr);  /* 11.5 kHz down to 4.7 kHz */
+    fx_bq_lowshelf(&d->shelf, 95.0f, 0.75f, 6.5f * a, sr);
+    fx_bq_bell(&d->cut, 300.0f, 0.9f, -2.5f * a, sr);
+    fx_bq_lowpass(&d->lp, 11500.0f * fx_exp2f(-1.30f * a), 0.65f, sr);  /* 11.5 kHz down to 4.7 kHz */
 
     /* glue: a gentle bus compressor (2:1 at full), for the vibe rather than loudness */
     d->thr = -10.0f - 6.0f * a;
@@ -106,8 +111,17 @@ STAGE static void dub_control(fx_dub *d, float pos, float sr)
 
     d->trim = fx_db2lin(-7.2f * a);   /* level-matched: full sounds as loud as off */
 
+wobble:;
+
+    /* the wobble for this chunk: from where the last one ended to the oscillators' next step */
+    float t = d->wow_c * d->wow_rc - d->wow_s * d->wow_rs;
+    d->wow_s = d->wow_s * d->wow_rc + d->wow_c * d->wow_rs; d->wow_c = t;
+    t = d->flt_c * d->flt_rc - d->flt_s * d->flt_rs;
+    d->flt_s = d->flt_s * d->flt_rc + d->flt_c * d->flt_rs; d->flt_c = t;
     osc_norm(&d->wow_c, &d->wow_s);
     osc_norm(&d->flt_c, &d->flt_s);
+    float end = d->wow_depth * d->wow_s + d->flt_depth * d->flt_s;
+    d->off_step = (end - d->off) * (1.0f / (float)FX_CHUNK);
 }
 
 STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
@@ -130,47 +144,55 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
         return;
     }
 
-    /* 1: the tape: write the delay line, read the dry centre tap and the wobbling wet tap */
+    /* fading in or out: the dry signal is needed for the crossfade */
+    const int fading = d->gate != d->gate_target || d->gate != 1.0f;
+
+    /* 1: the tape: write the delay line, read the wobbling wet tap */
     {
-        float wc = d->wow_c, ws = d->wow_s, fc = d->flt_c, fs = d->flt_s;
-        const float wrc = d->wow_rc, wrs = d->wow_rs, frc = d->flt_rc, frs = d->flt_rs;
-        const float wd = d->wow_depth, fd = d->flt_depth;
+        const int w0 = wpos;
+        float off = d->off;
+        const float os = d->off_step;
         for (int i = 0; i < n; i++) {
             b0[wpos] = l[i];
             b1[wpos] = r[i];
-            int tap = (wpos - DUB_CENTER) & (DUB_DL - 1);
-            dry[0][i] = b0[tap];
-            dry[1][i] = b1[tap];
-            float t = wc * wrc - ws * wrs; ws = ws * wrc + wc * wrs; wc = t;
-            t = fc * frc - fs * frs; fs = fs * frc + fc * frs; fc = t;
-            float idx = (float)(wpos + DUB_DL) - ((float)DUB_CENTER + wd * ws + fd * fs);
+            float idx = (float)(wpos + DUB_DL - DUB_CENTER) - off;
+            off += os;
             int i0 = (int)idx;
             float fr = idx - (float)i0;
             int k0 = i0 & (DUB_DL - 1), k1 = (i0 + 1) & (DUB_DL - 1);
-            x[0][i] = b0[k0] + fr * (b0[k1] - b0[k0]);
-            x[1][i] = b1[k0] + fr * (b1[k1] - b1[k0]);
+            float p0 = b0[k0], q0 = b1[k0];
+            x[0][i] = p0 + fr * (b0[k1] - p0);
+            x[1][i] = q0 + fr * (b1[k1] - q0);
             wpos = (wpos + 1) & (DUB_DL - 1);
         }
         d->wpos = wpos;
-        d->wow_c = wc; d->wow_s = ws; d->flt_c = fc; d->flt_s = fs;
+        d->off = off;
+        if (fading) {
+            /* the centre taps: still in the line (it is longer than a chunk plus the centre) */
+            for (int i = 0; i < n; i++) {
+                int tap = (w0 + i - DUB_CENTER) & (DUB_DL - 1);
+                dry[0][i] = b0[tap];
+                dry[1][i] = b1[tap];
+            }
+        }
     }
 
     /* 2: the EQ, one channel at a time so the filter states stay in registers */
     for (int c = 0; c < 2; c++) {
-        fx_svf_state *st = d->st[c];
-        float hz = st[0].ic1, s1 = st[1].ic1, s2 = st[1].ic2;
-        float c1 = st[2].ic1, c2 = st[2].ic2;
-        const fx_svf S = d->shelf, C = d->cut;
+        fx_bq_state *st = d->st[c];
+        float hz = d->hp_z[c], s1 = st[0].s1, s2 = st[0].s2;
+        float c1 = st[1].s1, c2 = st[1].s2;
+        const fx_bq S = d->shelf, C = d->cut;
         const float hc = d->hp_c;
         float *v = x[c];
         for (int i = 0; i < n; i++) {
             hz += hc * (v[i] - hz);          /* rumble: a one-pole high-pass */
             float y = v[i] - hz;
-            y = fx_svf_tick(S.a1, S.a2, S.a3, S.m0, S.m1, S.m2, &s1, &s2, y);
-            v[i] = fx_svf_tick(C.a1, C.a2, C.a3, C.m0, C.m1, C.m2, &c1, &c2, y);
+            y = fx_bq_tick(S.b0, S.b1, S.b2, S.a1, S.a2, &s1, &s2, y);
+            v[i] = fx_bq_tick(C.b0, C.b1, C.b2, C.a1, C.a2, &c1, &c2, y);
         }
-        st[0].ic1 = hz; st[1].ic1 = s1; st[1].ic2 = s2;
-        st[2].ic1 = c1; st[2].ic2 = c2;
+        d->hp_z[c] = hz; st[0].s1 = s1; st[0].s2 = s2;
+        st[1].s1 = c1; st[1].s2 = c2;
     }
 
     /* 3: the compressor: a peak envelope every frame, the gain every fourth frame, glided
@@ -188,21 +210,25 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
             /* the detector hears the signal above 150 Hz: the bass stays big, the kick doesn't
              * pump the mix */
             sl0 += scc * (x[0][i] - sl0); sl1 += scc * (x[1][i] - sl1);
-            float a0 = fx_absf(x[0][i] - sl0), a1 = fx_absf(x[1][i] - sl1);
-            float pk = a0 > a1 ? a0 : a1;
+            uint32_t a0 = fx_abs_bits(x[0][i] - sl0), a1 = fx_abs_bits(x[1][i] - sl1);
+            float pk = fx_from_bits(a0 > a1 ? a0 : a1);
             env += (pk - env) * (pk > env ? att : rel);
             if (ph == 0) {
                 float over = fx_lin2db(env + 1e-9f) - thr, gr;
                 if (2.0f * over < -knee) gr = 0.0f;
                 else if (2.0f * over > knee) gr = slope * over;
                 else { float k = over + 0.5f * knee; gr = slope * k * k * (0.5f / knee); }
-                dg = (fx_db2lin(gr + mk) - g) * 0.25f;
+                dg = (fx_db2lin(gr + mk) - g) * 0.125f;
             }
-            ph = (ph + 1) & 3;
+            ph = (ph + 1) & 7;
             g += dg;
             gain[i] = g;
-            if (gg != gt) { gg += gg < gt ? gstep : -gstep; gg = fx_clampf(gg, 0.0f, 1.0f); }
-            gates[i] = gg;
+        }
+        if (fading) {
+            for (int i = 0; i < n; i++) {
+                if (gg != gt) { gg += gg < gt ? gstep : -gstep; gg = fx_clampf(gg, 0.0f, 1.0f); }
+                gates[i] = gg;
+            }
         }
         d->sc_lp[0] = sl0; d->sc_lp[1] = sl1;
         d->env = env; d->gain = g; d->cphase = ph; d->dg = dg; d->gate = gg;
@@ -212,35 +238,44 @@ STAGE static void dub_process(fx_dub *d, float *l, float *r, int n, float sr)
     for (int c = 0; c < 2; c++) {
         float *out = c ? r : l;
         float *v = x[c];
+        /* the saturation, y + mix * ((softclip(y * drive + bias) - softclip(bias)) / drive - y),
+         * folded: below the clip point that is y + k0 - k3 * u^3 with u = y * drive + bias */
         const float drive = d->drive, idr = d->inv_drive, mix = d->sat_mix, bias = d->bias;
         const float bout = d->bias_out, trim = d->trim, dcr = d->dc_r;
-        const fx_svf LP = d->lp;
-        float lp1 = d->st[c][4].ic1, lp2 = d->st[c][4].ic2;
+        const float k0 = mix * idr * (bias - bout), k3 = mix * idr * 0.14814815f;
+        const fx_bq LP = d->lp;
+        float lp1 = d->st[c][2].s1, lp2 = d->st[c][2].s2;
         float dx = d->dc_x[c], dy = d->dc_y[c];
         for (int i = 0; i < n; i++) {
             float y = v[i] * gain[i];
-            float t = (fx_softclip(y * drive + bias) - bout) * idr;
-            y += mix * (t - y);
-            y = fx_svf_tick(LP.a1, LP.a2, LP.a3, LP.m0, LP.m1, LP.m2, &lp1, &lp2, y);
+            float u = y * drive + bias;
+            if (fx_abs_bits(u) <= 0x3fc00000u) y += k0 - k3 * u * u * u;
+            else y += mix * (((u > 0.0f ? 1.0f : -1.0f) - bout) * idr - y);
+            y = fx_bq_tick(LP.b0, LP.b1, LP.b2, LP.a1, LP.a2, &lp1, &lp2, y);
             float o = y - dx + dcr * dy;
             dx = y; dy = o;
-            o *= trim;
-            out[i] = dry[c][i] + gates[i] * (o - dry[c][i]);
+            out[i] = o * trim;
         }
-        d->st[c][4].ic1 = lp1; d->st[c][4].ic2 = lp2;
+        if (fading) {
+            const float *dr = dry[c];
+            for (int i = 0; i < n; i++) out[i] = dr[i] + gates[i] * (out[i] - dr[i]);
+        }
+        d->st[c][2].s1 = lp1; d->st[c][2].s2 = lp2;
         d->dc_x[c] = dx; d->dc_y[c] = dy;
     }
 
     if (d->gate == 0.0f && d->gate_target == 0.0f) {
         /* fully off: start clean next time */
         for (int c = 0; c < 2; c++) {
-            for (int k = 0; k < 5; k++) d->st[c][k] = (fx_svf_state){0};
+            for (int k = 0; k < 3; k++) d->st[c][k] = (fx_bq_state){0};
+            d->hp_z[c] = 0.0f;
             d->dc_x[c] = d->dc_y[c] = 0.0f;
         }
         d->env = 0.0f;
         d->sc_lp[0] = d->sc_lp[1] = 0.0f;
         d->gain = 1.0f;
         d->dg = 0.0f;
+        d->off = d->off_step = 0.0f;
     }
 }
 
@@ -266,6 +301,10 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
     f->gate_target = t > 0.0f && mode == f->mode ? 1.0f : 0.0f;
     if (f->gate == 0.0f && f->gate_target == 0.0f) return;
     t = fx_clampf(t, 0.0f, 1.0f);
+    if (t == f->set_t && f->res == f->set_res && f->mode == f->set_mode) return;  /* parked */
+    f->set_t = t;
+    f->set_res = f->res;
+    f->set_mode = f->mode;
 
     /* 24 dB/oct; page 2 sets how much resonance builds toward the ends */
     float res_scale = 0.3f + 1.4f * f->res;
@@ -284,23 +323,39 @@ STAGE static void filter_control(fx_filter *f, float pos, float sr)
 STAGE static void filter_process(fx_filter *f, float *l, float *r, int n, float sr)
 {
     if (f->gate == 0.0f && f->gate_target == 0.0f) return; /* flat: untouched, 0 CPU */
-    float gate[FX_CHUNK];
+    float gate[FX_CHUNK], dry[2][FX_CHUNK];
     float g = f->gate, gt = f->gate_target, gstep = 1.0f / (0.015f * sr);
-    for (int i = 0; i < n; i++) {
-        if (g != gt) { g += g < gt ? gstep : -gstep; g = fx_clampf(g, 0.0f, 1.0f); }
-        gate[i] = g;
+    int fading = g != gt || g != 1.0f;
+    if (fading) {
+        for (int i = 0; i < n; i++) {
+            if (g != gt) { g += g < gt ? gstep : -gstep; g = fx_clampf(g, 0.0f, 1.0f); }
+            gate[i] = g;
+            dry[0][i] = l[i];
+            dry[1][i] = r[i];
+        }
+        f->gate = g;
     }
-    f->gate = g;
     const fx_svf A = f->s1, B = f->s2;
     for (int c = 0; c < 2; c++) {
         float *x = c ? r : l;
         float a1 = f->st[c][0].ic1, a2 = f->st[c][0].ic2, b1 = f->st[c][1].ic1, b2 = f->st[c][1].ic2;
-        for (int i = 0; i < n; i++) {
-            float y = fx_svf_tick(A.a1, A.a2, A.a3, A.m0, A.m1, A.m2, &a1, &a2, x[i]);
-            y = fx_svf_tick(B.a1, B.a2, B.a3, B.m0, B.m1, B.m2, &b1, &b2, y);
-            x[i] += gate[i] * (y - x[i]);
+        if (f->mode) {
+            for (int i = 0; i < n; i++) {
+                float y = fx_svf_lp(A.a1, A.a2, A.a3, &a1, &a2, x[i]);
+                x[i] = fx_svf_lp(B.a1, B.a2, B.a3, &b1, &b2, y);
+            }
+        } else {
+            const float ka = -A.m1, kb = -B.m1;
+            for (int i = 0; i < n; i++) {
+                float y = fx_svf_hp(A.a1, A.a2, A.a3, ka, &a1, &a2, x[i]);
+                x[i] = fx_svf_hp(B.a1, B.a2, B.a3, kb, &b1, &b2, y);
+            }
         }
         f->st[c][0].ic1 = a1; f->st[c][0].ic2 = a2; f->st[c][1].ic1 = b1; f->st[c][1].ic2 = b2;
+        if (fading) {
+            const float *d = dry[c];
+            for (int i = 0; i < n; i++) x[i] = d[i] + gate[i] * (x[i] - d[i]);
+        }
     }
 }
 
@@ -349,10 +404,17 @@ STAGE static void crush_process(fx_bitcrush *c, float *l, float *r, int n, float
     float ph = c->phase, env = c->env;
     float hl = c->hold_l, hr = c->hold_r;
 
+    float mix[FX_CHUNK];
+    const int fading = g != gt || g != 1.0f;
+    if (fading) {
+        for (int i = 0; i < n; i++) {
+            if (g != gt) { g += g < gt ? gstep : -gstep; g = fx_clampf(g, 0.0f, 1.0f); }
+            mix[i] = g * wet;
+        }
+    }
     for (int i = 0; i < n; i++) {
-        if (g != gt) { g += g < gt ? gstep : -gstep; g = fx_clampf(g, 0.0f, 1.0f); }
-        float al = fx_absf(l[i]), ar = fx_absf(r[i]);
-        float pk = al > ar ? al : ar;
+        uint32_t ul = fx_abs_bits(l[i]), ur = fx_abs_bits(r[i]);
+        float pk = fx_from_bits(ul > ur ? ul : ur);
         env = pk > env ? pk : env + rel * (pk - env);   /* instant attack: |x| <= env always */
         ph += rr;
         if (ph >= 1.0f) {
@@ -364,7 +426,7 @@ STAGE static void crush_process(fx_bitcrush *c, float *l, float *r, int n, float
             hl = fx_roundf(l[i] * k) * s;
             hr = fx_roundf(r[i] * k) * s;
         }
-        float m = g * wet;
+        float m = fading ? mix[i] : wet;
         l[i] += m * (hl - l[i]);
         r[i] += m * (hr - r[i]);
     }
@@ -385,7 +447,7 @@ STAGE static void crush_process(fx_bitcrush *c, float *l, float *r, int n, float
  * the reduction is the larger of the two. Fader: Peak Reduction, with the makeup (Gain) set
  * along with it so the level stays roughly put while the sound gets denser. */
 
-#define LA_RATE 4     /* the cell's state moves every fourth frame */
+#define LA_RATE 8     /* the cell's state moves every eighth frame (6 kHz) */
 
 static void limiter_init(fx_limiter *m, float sr)
 {
@@ -430,43 +492,45 @@ STAGE static void limiter_control(fx_limiter *m, float sr)
 STAGE static void la2a_process(fx_limiter *m, float *l, float *r, int n)
 {
     float meter = m->meter;
-    {
-        const float da = m->det_att, dr = m->det_rel, thr = m->thr, slope = m->slope, knee = m->knee;
-        const float ca = m->c_att, crf = m->c_rel_f, ccs = m->c_chg_s, crs = m->c_rel_s;
-        const float mk = m->makeup_db, fade = m->fade, tube = m->tube;
-        float det = m->det, gf = m->gr_f, gs = m->gr_s, g = m->g, dg = m->dg;
-        int ph = m->cphase;
-        for (int i = 0; i < n; i++) {
-            float al = fx_absf(l[i]), ar = fx_absf(r[i]);
-            float pk = al > ar ? al : ar;
-            det += (pk - det) * (pk > det ? da : dr);
-            if (ph == 0) {
-                float over = fx_lin2db(det + 1e-9f) - thr, gt;
-                if (2.0f * over < -knee) gt = 0.0f;
-                else if (2.0f * over > knee) gt = slope * over;
-                else { float k = over + 0.5f * knee; gt = slope * k * k * (0.5f / knee); }
-                gf += (gt - gf) * (gt > gf ? ca : crf);
-                float ts = 0.5f * gf;
-                gs += (ts - gs) * (ts > gs ? ccs : crs);
-                float gr = gf > gs ? gf : gs;
-                float red = fade * gr;
-                float u = 1.0f - fx_db2lin(-red);
-                if (u > meter) meter = u;
-                dg = (fx_db2lin(fade * mk - red) - g) * (1.0f / LA_RATE);
-            }
-            ph = (ph + 1) & (LA_RATE - 1);
-            g += dg;
-            float yl = l[i] * g, yr = r[i] * g;
-            yl += tube * (fx_softclip(yl) - yl);
-            yr += tube * (fx_softclip(yr) - yr);
-            l[i] = yl; r[i] = yr;
+    const float da = m->det_att, dr = m->det_rel, thr = m->thr, slope = m->slope, knee = m->knee;
+    const float ca = m->c_att, crf = m->c_rel_f, ccs = m->c_chg_s, crs = m->c_rel_s;
+    const float mk = m->makeup_db, fade = m->fade, tube = m->tube;
+    const float kt = tube * 0.14814815f;               /* the tube: y - tube * 0.148 y^3 */
+    const uint32_t clip = 0x3fc00000u;                 /* 1.5f: above it the cubic is flat at 1 */
+    float det = m->det, gf = m->gr_f, gs = m->gr_s, g = m->g, dg = m->dg;
+    int ph = m->cphase;
+    for (int i = 0; i < n; i++) {
+        uint32_t ul = fx_abs_bits(l[i]), ur = fx_abs_bits(r[i]);
+        float pk = fx_from_bits(ul > ur ? ul : ur);
+        det += (pk - det) * (pk > det ? da : dr);
+        if (ph == 0) {
+            float over = fx_lin2db(det + 1e-9f) - thr, gt;
+            if (2.0f * over < -knee) gt = 0.0f;
+            else if (2.0f * over > knee) gt = slope * over;
+            else { float k = over + 0.5f * knee; gt = slope * k * k * (0.5f / knee); }
+            gf += (gt - gf) * (gt > gf ? ca : crf);
+            float ts = 0.5f * gf;
+            gs += (ts - gs) * (ts > gs ? ccs : crs);
+            float gr = gf > gs ? gf : gs;
+            float red = fade * gr;
+            float u = 1.0f - fx_db2lin(-red);
+            if (u > meter) meter = u;
+            dg = (fx_db2lin(fade * mk - red) - g) * (1.0f / LA_RATE);
         }
-        m->det = det; m->gr_f = gf; m->gr_s = gs; m->g = g; m->dg = dg; m->cphase = ph;
-        if (m->amt == 0.0f && fx_absf(g - 1.0f) < 1e-6f) {
-            /* back to off: start clean next time */
-            m->g = 1.0f; m->dg = 0.0f; m->det = m->gr_f = m->gr_s = 0.0f; m->cphase = 0;
-            m->active = 0;
-        }
+        ph = (ph + 1) & (LA_RATE - 1);
+        g += dg;
+        float yl = l[i] * g, yr = r[i] * g;
+        if (fx_abs_bits(yl) <= clip) yl -= kt * yl * yl * yl;
+        else yl += tube * ((yl > 0.0f ? 1.0f : -1.0f) - yl);
+        if (fx_abs_bits(yr) <= clip) yr -= kt * yr * yr * yr;
+        else yr += tube * ((yr > 0.0f ? 1.0f : -1.0f) - yr);
+        l[i] = yl; r[i] = yr;
+    }
+    m->det = det; m->gr_f = gf; m->gr_s = gs; m->g = g; m->dg = dg; m->cphase = ph;
+    if (m->amt == 0.0f && fx_absf(g - 1.0f) < 1e-6f) {
+        /* back to off: start clean next time */
+        m->g = 1.0f; m->dg = 0.0f; m->det = m->gr_f = m->gr_s = 0.0f; m->cphase = 0;
+        m->active = 0;
     }
     m->meter = meter;
 }
@@ -480,32 +544,42 @@ STAGE static void la2a_process(fx_limiter *m, float *l, float *r, int n)
 STAGE static void ceiling_process(fx_limiter *m, float *l, float *r, int n)
 {
     const float ceil = m->ceiling;
-    float acc = m->acc_pk, g = m->sg, gs = m->sg_step, meter = m->meter;
+    const uint32_t ceil_bits = fx_abs_bits(ceil);
+    uint32_t acc = fx_abs_bits(m->acc_pk);
+    float g = m->sg, gs = m->sg_step, meter = m->meter;
     int p = m->pos_dl, sn = m->sn;
-    for (int i = 0; i < n; i++) {
-        float xl = l[i], xr = r[i];
-        float al = fx_absf(xl), ar = fx_absf(xr);
-        if (al > acc) acc = al;
-        if (ar > acc) acc = ar;
-        float ol = m->dl[0][p], orr = m->dl[1][p];
-        m->dl[0][p] = xl; m->dl[1][p] = xr;
-        p = p + 1 < LIM_LA ? p + 1 : 0;
-        if (g != 1.0f) { ol *= g; orr *= g; }
-        l[i] = fx_clampf(ol, -ceil, ceil);
-        r[i] = fx_clampf(orr, -ceil, ceil);
-        g += gs;
-        if (++sn == LIM_SEG) {
+    /* the delay line is a whole number of segments, so a segment never wraps inside it */
+    while (n > 0) {
+        int run = LIM_SEG - sn;
+        if (run > n) run = n;
+        float *d0 = &m->dl[0][p], *d1 = &m->dl[1][p];
+        for (int i = 0; i < run; i++) {
+            float xl = l[i], xr = r[i];
+            uint32_t ul = fx_abs_bits(xl), ur = fx_abs_bits(xr);
+            uint32_t u = ul > ur ? ul : ur;
+            acc = u > acc ? u : acc;
+            float ol = d0[i] * g, orr = d1[i] * g;
+            d0[i] = xl; d1[i] = xr;
+            if (fx_abs_bits(ol) > ceil_bits) ol = ol > 0.0f ? ceil : -ceil;
+            if (fx_abs_bits(orr) > ceil_bits) orr = orr > 0.0f ? ceil : -ceil;
+            l[i] = ol; r[i] = orr;
+            g += gs;
+        }
+        l += run; r += run; n -= run;
+        p += run; if (p == LIM_LA) p = 0;
+        sn += run;
+        if (sn == LIM_SEG) {
             /* a segment in: its need joins the ring, newest at [si] */
             sn = 0;
             int si = m->si;
-            m->seg[si] = acc > ceil ? 1.0f - ceil / acc : 0.0f;
-            acc = 0.0f;
+            m->seg[si] = acc > ceil_bits ? 1.0f - ceil / fx_from_bits(acc) : 0.0f;
+            acc = 0;
             /* ages: 0 newest .. LIM_NSEG-1 the one now going out */
+            static const float w[LIM_NSEG] = { 0.2f, 0.4f, 0.6f, 0.8f, 1.0f, 1.0f };
             float red = 0.0f;
             for (int a = 0; a < LIM_NSEG; a++) {
                 int k = si - a; if (k < 0) k += LIM_NSEG;
-                float w = a >= LIM_NSEG - 2 ? 1.0f : (float)(a + 1) / (float)(LIM_NSEG - 1);
-                float v = m->seg[k] * w;
+                float v = m->seg[k] * w[a];
                 if (v > red) red = v;
             }
             m->si = si + 1 < LIM_NSEG ? si + 1 : 0;
@@ -519,7 +593,7 @@ STAGE static void ceiling_process(fx_limiter *m, float *l, float *r, int n)
             if (ge == 1.0f && g == 1.0f) gs = 0.0f;
         }
     }
-    m->acc_pk = acc; m->sg = g; m->sg_step = gs; m->meter = meter;
+    m->acc_pk = fx_from_bits(acc); m->sg = g; m->sg_step = gs; m->meter = meter;
     m->pos_dl = p; m->sn = sn;
 }
 
@@ -543,6 +617,7 @@ void fx_init(fx_engine *e, float sr)
     dub_init(&e->dub, sr);
     e->filter.pos = 0.5f;
     e->filter.res = 0.5f;
+    e->filter.set_t = -1.0f;
     crush_init(&e->crush, sr);
     limiter_init(&e->limiter, sr);
 }
