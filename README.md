@@ -4,7 +4,9 @@ Firmware that turns the Teenage Engineering SP-1 into a four-effect processor. P
 over USB-C (it shows up as a sound card, "SP-1FX", on a computer, phone or tablet), shape it with
 the four faders, and hear it on headphones or the speaker.
 
-**Firmware:** [`sp1fx.bin`](sp1fx.bin), **v0.2.0** ([all releases](https://github.com/sydilaxe/SP-1FX/releases))
+**Firmware:** [`sp1fx.bin`](sp1fx.bin)
+
+**Latest release:** [v0.2.0](../../releases/tag/v0.2.0) · [all releases](../../releases)
 
 > **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
 > follows firmware that does run on the SP-1 (see Credits), but this exact binary has not been on
