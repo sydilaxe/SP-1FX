@@ -24,7 +24,8 @@ Each fader has a second parameter on page 2 (see Controls).
 After the four effects, a **safety ceiling** at -1 dBFS (1 ms look-ahead) is always on. It only
 acts on overs, to protect the speaker and headphones.
 
-**Full bandwidth, 24-bit:** audio is 48 kHz / 24-bit in and out, and the effects run at 48 kHz in
+**Full bandwidth, 16- or 24-bit:** USB audio is 48 kHz, 16-bit or 24-bit (the host picks: Linux
+handhelds such as the TrimUI Brick use 16-bit, computers usually 24-bit), out at 24-bit; the effects run at 48 kHz in
 32-bit floating point. There is no colouring stage: with every fader at rest the output is the
 input, bit for bit, 64 samples (1.3 ms) later.
 
