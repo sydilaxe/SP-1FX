@@ -106,11 +106,39 @@ jobs:
           name: test-output
           path: build/test/
 
+  manual:
+    name: User manual (PDF)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, for the version on the cover
+      - name: Tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq pandoc fonts-inter >/dev/null
+      - name: Build the PDF
+        env:
+          VERSION: ${{ inputs.release_tag || github.event.release.tag_name || '' }}
+        run: |
+          [ -n "$VERSION" ] || unset VERSION
+          CHROME=$(command -v google-chrome) ./scripts/build-manual.sh
+      - name: Remind to update the manual
+        if: github.event_name == 'pull_request'
+        run: |
+          # firmware or engine changed but the manual didn't: a nudge, not a failure
+          changed=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+          if echo "$changed" | grep -qE '^(firmware/src|fx)/' && ! echo "$changed" | grep -q '^docs/manual/'; then
+            echo "::warning title=Manual not updated::firmware/ or fx/ changed but docs/manual/manual.md did not. If anything a player sees or hears changed, update the manual."
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: manual
+          path: build/manual/SP-1FX-manual.pdf
+
   release:
     name: Publish release
     # runs for: a pushed v* tag, a release created on the website, or a manual run with a tag filled in
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'release' || inputs.release_tag != ''
-    needs: [firmware, test]
+    needs: [firmware, test, manual]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -119,15 +147,18 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: sp1fx-firmware
-      - name: Create GitHub release with sp1fx.bin
+      - uses: actions/download-artifact@v4
+        with:
+          name: manual
+      - name: Create GitHub release with sp1fx.bin and the manual
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || github.event.release.tag_name || github.ref_name }}
         run: |
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" sp1fx.bin --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$TAG" sp1fx.bin SP-1FX-manual.pdf --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$TAG" sp1fx.bin \
+            gh release create "$TAG" sp1fx.bin SP-1FX-manual.pdf \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "SP-1FX $TAG (test build)" \

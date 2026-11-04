@@ -8,6 +8,8 @@ the four faders, and hear it on headphones or the speaker.
 
 **Latest release:** [v0.2.0](../../releases/tag/v0.2.0) · [all releases](../../releases)
 
+**Manual:** `SP-1FX-manual.pdf` on each [release](../../releases) (source: [`docs/manual/manual.md`](docs/manual/manual.md))
+
 > **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
 > follows firmware that does run on the SP-1 (see Credits), but this exact binary has not been on
 > hardware. Before flashing, read [Flashing and getting back](#flashing-and-getting-back).
@@ -93,6 +95,7 @@ middle and top.
 make test        # the engine on your computer: checks, and WAVs in build/test
 make firmware    # sp1fx.bin; needs ZEPHYR_BASE (Zephyr v4.3.1) and the Zephyr SDK 0.17.4
 make bench       # the Cortex-M4 cycle estimate (pip install unicorn capstone)
+./scripts/build-manual.sh   # the user manual, build/manual/SP-1FX-manual.pdf (pandoc + Chrome)
 ```
 
 `.github/workflows/build.yml` does all three on every push and keeps `sp1fx.bin` and the WAVs as
@@ -105,6 +108,7 @@ artifacts.
 | `firmware/` | Zephyr application: USB audio (UAC2), I2S, codecs, faders, buttons, lights, power |
 | `boards/` | the SP-1 board definition |
 | `tools/bench_m4.py` | the CPU estimate |
+| `docs/manual/` | the user manual (Markdown); CI builds the PDF and attaches it to every release |
 
 ## Credits
 
