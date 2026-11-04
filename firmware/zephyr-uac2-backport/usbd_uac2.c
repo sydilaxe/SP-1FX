@@ -38,6 +38,14 @@ LOG_MODULE_REGISTER(usbd_uac2, CONFIG_USBD_UAC2_LOG_LEVEL);
 bool uac2_fs_fb_windows_fmt;
 #endif
 
+#if defined(CONFIG_USBD_UAC2_SP1_ALT24)
+/* Alternate setting the host chose for the first AudioStreaming interface:
+ * 0 = idle, 1 = devicetree format (16-bit), 2 = 24-bit. Read by the app. */
+volatile uint8_t uac2_sp1_alt;
+/* The same, per AudioStreaming interface, for the class itself. */
+static uint8_t sp1_as_alt[32];
+#endif
+
 #define DT_DRV_COMPAT zephyr_uac2
 
 #define COUNT_UAC2_AS_ENDPOINT_BUFFERS(node)					\
@@ -159,6 +167,34 @@ get_as_data_ep(struct usbd_class_data *const c_data, int as_idx)
 	    cfg->ep_indexes[as_idx] && descriptors) {
 		desc = descriptors[cfg->ep_indexes[as_idx]];
 	}
+
+#if defined(CONFIG_USBD_UAC2_SP1_ALT24)
+	/* Alternate 2 uses the same endpoint address with a larger
+	 * wMaxPacketSize: hand out its descriptor while it is active.
+	 */
+	if (desc && (sp1_as_alt[as_idx] > 1)) {
+		const struct usb_association_descriptor *iad =
+			(const struct usb_association_descriptor *)descriptors[0];
+		uint8_t iface = iad->bFirstInterface + 1 + as_idx;
+		uint8_t addr = ((const struct usb_ep_descriptor *)desc)->bEndpointAddress;
+		bool in_alt = false;
+
+		for (const struct usb_desc_header **d = descriptors;
+		     *d != NULL && (*d)->bLength != 0; d++) {
+			if ((*d)->bDescriptorType == USB_DESC_INTERFACE) {
+				const struct usb_if_descriptor *ifd =
+					(const struct usb_if_descriptor *)*d;
+
+				in_alt = (ifd->bInterfaceNumber == iface) &&
+					 (ifd->bAlternateSetting == sp1_as_alt[as_idx]);
+			} else if (in_alt && (*d)->bDescriptorType == USB_DESC_ENDPOINT &&
+				   ((const struct usb_ep_descriptor *)*d)->bEndpointAddress == addr) {
+				desc = *d;
+				break;
+			}
+		}
+	}
+#endif
 
 	return (const struct usb_ep_descriptor *)desc;
 }
@@ -520,6 +556,13 @@ void uac2_update(struct usbd_class_data *const c_data,
 	__ASSERT_NO_MSG((iface > iad->bFirstInterface) &&
 			(iface < iad->bFirstInterface + iad->bInterfaceCount));
 	as_idx = iface - iad->bFirstInterface - 1;
+
+#if defined(CONFIG_USBD_UAC2_SP1_ALT24)
+	sp1_as_alt[as_idx] = alternate;
+	if (as_idx == 0) {
+		uac2_sp1_alt = alternate;
+	}
+#endif
 
 	/* Notify application about terminal state change */
 	ctx->ops->terminal_update_cb(dev, cfg->as_terminals[as_idx], alternate,

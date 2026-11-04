@@ -889,6 +889,63 @@
 			AS_EXPLICIT_FEEDBACK_ENDPOINT_HS_DESCRIPTOR_PTR(node)))	\
 	))
 
+/* SP-1: alternate setting 2, the same full-speed ISO OUT stream as 24-bit
+ * (3-byte subslots). Appended after every other descriptor, so the indexes
+ * of alternate 1's endpoints (ep_indexes, fb_indexes) do not move.
+ */
+#if defined(CONFIG_USBD_UAC2_SP1_ALT24)
+#define AS_ALT24_APPLIES(node)							\
+	UTIL_AND(AS_IS_USB_ISO_OUT(node), AS_HAS_EXPLICIT_FEEDBACK_ENDPOINT(node))
+
+#define AS_ALT24_FS_DESCRIPTORS_ARRAYS(node)					\
+	IF_ENABLED(AS_ALT24_APPLIES(node), (					\
+	static uint8_t DESCRIPTOR_NAME(fs_as_if_alt2, node)[] = {		\
+		AS_INTERFACE_DESCRIPTOR(node, 2,				\
+			AS_INTERFACE_NUM_ENDPOINTS(node))			\
+	};									\
+	static uint8_t DESCRIPTOR_NAME(as_format24_desc, node)[] = {		\
+		0x06,					/* bLength */		\
+		CS_INTERFACE,				/* bDescriptorType */	\
+		AS_DESCRIPTOR_FORMAT_TYPE,		/* bDescriptorSubtype */\
+		FORMAT_TYPE_I,				/* bFormatType */	\
+		3,					/* bSubslotSize */	\
+		24,					/* bBitResolution */	\
+	};									\
+	static uint8_t DESCRIPTOR_NAME(fs_std_data24_ep, node)[] = {		\
+		0x07,					/* bLength */		\
+		USB_DESC_ENDPOINT,			/* bDescriptorType */	\
+		AS_DATA_EP_ADDR(node),			/* bEndpointAddress */	\
+		AS_DATA_EP_ATTR(node),			/* bmAttributes */	\
+		U16_LE(AUDIO_STREAMING_NUM_SPATIAL_LOCATIONS(node) * 3 *	\
+		       AS_SAMPLES_PER_FRAME(node)),	/* wMaxPacketSize */	\
+		AS_FS_DATA_EP_BINTERVAL(node),		/* bInterval */		\
+	};									\
+	static uint8_t DESCRIPTOR_NAME(fs_feedback24_ep, node)[] = {		\
+		AS_EXPLICIT_FEEDBACK_ENDPOINT_FS_DESCRIPTOR(node)		\
+	};))
+
+#define AS_ALT24_FS_DESCRIPTORS_PTRS(node)					\
+	IF_ENABLED(AS_ALT24_APPLIES(node), (					\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_as_if_alt2, node),	\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(as_general_desc, node),	\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(as_format24_desc, node),	\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_std_data24_ep, node),	\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(cs_data_ep, node),		\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_feedback24_ep, node),))
+
+#define AS_ALT24_ARRAYS_IF_AUDIOSTREAMING(node)					\
+	IF_ENABLED(UTIL_AND(DT_NODE_HAS_COMPAT(node, zephyr_uac2_audio_streaming),\
+			    UAC2_ALLOWED_AT_FULL_SPEED(DT_PARENT(node))), (	\
+		AS_ALT24_FS_DESCRIPTORS_ARRAYS(node)))
+
+#define AS_ALT24_FS_PTRS_IF_AUDIOSTREAMING(node)				\
+	IF_ENABLED(DT_NODE_HAS_COMPAT(node, zephyr_uac2_audio_streaming), (	\
+		AS_ALT24_FS_DESCRIPTORS_PTRS(node)))
+#else
+#define AS_ALT24_ARRAYS_IF_AUDIOSTREAMING(node)
+#define AS_ALT24_FS_PTRS_IF_AUDIOSTREAMING(node)
+#endif
+
 #define AS_DESCRIPTORS_ARRAYS_IF_AUDIOSTREAMING(node)				\
 	IF_ENABLED(DT_NODE_HAS_COMPAT(node, zephyr_uac2_audio_streaming), (	\
 		AS_DESCRIPTORS_ARRAYS(node)))
@@ -925,12 +982,14 @@
 #define UAC2_DESCRIPTOR_ARRAYS(node)						\
 	UAC2_INTERFACE_ASSOCIATION_DESCRIPTOR_ARRAY(node)			\
 	UAC2_AUDIO_CONTROL_DESCRIPTOR_ARRAYS(node)				\
-	DT_FOREACH_CHILD(node, AS_DESCRIPTORS_ARRAYS_IF_AUDIOSTREAMING)
+	DT_FOREACH_CHILD(node, AS_DESCRIPTORS_ARRAYS_IF_AUDIOSTREAMING)	\
+	DT_FOREACH_CHILD(node, AS_ALT24_ARRAYS_IF_AUDIOSTREAMING)
 
 #define UAC2_FS_DESCRIPTOR_PTRS(node)						\
 	UAC2_INTERFACE_ASSOCIATION_FS_DESCRIPTOR_PTR(node)			\
 	UAC2_AUDIO_CONTROL_FS_DESCRIPTOR_PTRS(node)				\
 	DT_FOREACH_CHILD(node, AS_FS_DESCRIPTORS_PTRS_IF_AUDIOSTREAMING)	\
+	DT_FOREACH_CHILD(node, AS_ALT24_FS_PTRS_IF_AUDIOSTREAMING)		\
 	NULL
 
 #define UAC2_HS_DESCRIPTOR_PTRS(node)						\

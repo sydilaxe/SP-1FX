@@ -1,6 +1,6 @@
 /* SP-1FX: a four-effect processor for the Teenage Engineering SP-1.
  *
- * Audio in:  USB-C, class compliant (UAC2), 48 kHz / 24-bit stereo, from a computer or phone.
+ * Audio in:  USB-C, class compliant (UAC2), 48 kHz / 16- or 24-bit stereo (the host picks), from a computer or phone.
  * Audio out: headphones (CS42L42) or, with nothing plugged in, the speaker (TAS2505), 24-bit.
  * In between, fx/fx.c at 48 kHz: one effect per fader (DUB, FILTER, CRUSH, LA-2A), then a
  * safety ceiling.
@@ -402,7 +402,9 @@ static void hp_codec_init(void)
 }
 
 /* -------------------------------------------------------------- USB audio ----
- * The host streams 48 kHz / 24-bit stereo into a ring; the audio thread drains it. The ring's
+ * The host streams 48 kHz stereo, 16-bit (alternate setting 1) or 24-bit (alternate setting 2),
+ * whichever it supports: Linux handhelds such as the TrimUI Brick open the card as 16-bit. Either
+ * way it lands in the ring as 24-bit frames; the audio thread drains it. The ring's
  * fill steers the explicit feedback, so the host sends at the rate the I2S bus really runs. */
 #define USB_FRAME_BYTES 6u
 #define USB_RING_FRAMES 1024u
@@ -443,7 +445,9 @@ static void feedback_update(void)
 }
 
 #define UAC2_IN_TERMINAL_ID UAC2_ENTITY_ID(DT_NODELABEL(in_terminal))
-#define UAC2_MAX_PKT        ((48 + 1) * USB_FRAME_BYTES)
+#define UAC2_MAX_PKT        ((48 + 1) * USB_FRAME_BYTES)   /* the 24-bit packet, the larger one */
+
+extern volatile uint8_t uac2_sp1_alt;   /* usbd_uac2.c: 1 = 16-bit, 2 = 24-bit */
 K_MEM_SLAB_DEFINE_STATIC(uac2_rx_slab, ROUND_UP(UAC2_MAX_PKT, UDC_BUF_GRANULARITY), 16, UDC_BUF_ALIGN);
 
 static const struct device *const uac2_dev = DEVICE_DT_GET(DT_NODELABEL(uac2_speaker));
@@ -482,8 +486,22 @@ static void uac2_data_recv_cb(const struct device *dev, uint8_t terminal, void *
 {
 	ARG_UNUSED(dev); ARG_UNUSED(terminal); ARG_UNUSED(user_data);
 	if (g_usb_streaming && size) {
+		const uint8_t *src = (const uint8_t *)buf;
+		static uint8_t wide[UAC2_MAX_PKT];
+		if (uac2_sp1_alt == 1) {
+			/* 16-bit: widen each sample to 24-bit (low byte 0) */
+			uint32_t n = size / 2u;
+			if (n > UAC2_MAX_PKT / 3u) n = UAC2_MAX_PKT / 3u;
+			for (uint32_t i = 0; i < n; i++) {
+				wide[3 * i] = 0;
+				wide[3 * i + 1] = src[2 * i];
+				wide[3 * i + 2] = src[2 * i + 1];
+			}
+			src = wide;
+			size = (uint16_t)(n * 3u);
+		}
 		if (ring_buf_space_get(&usb_ring) >= size)
-			(void)ring_buf_put(&usb_ring, (const uint8_t *)buf, size);
+			(void)ring_buf_put(&usb_ring, src, size);
 		else
 			g_ring_over++;   /* drop the whole packet: one clean 1 ms gap */
 	}

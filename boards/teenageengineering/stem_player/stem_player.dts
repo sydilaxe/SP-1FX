@@ -1,6 +1,7 @@
 /*
  * Teenage Engineering SP-1 board definition, from chattock/sp1-tape-looper (MIT), used by SP-1FX.
- * SP-1FX change: the USB audio stream is 24-bit.
+ * USB audio: 16-bit here (alternate setting 1, as the looper). The app's UAC2 class adds a 24-bit
+ * alternate setting 2 (CONFIG_USBD_UAC2_SP1_ALT24). 24-bit only lost Linux handhelds (TrimUI Brick).
  *
  * Original note:
  * Teenage Engineering SP-1 board definition for the sp1-tape-looper firmware.
@@ -61,7 +62,7 @@
 	 * Structure from zephyr/samples/subsys/usb/uac2_explicit_feedback
 	 * (v4.1.0), labels renamed to what the looper's main.c expects:
 	 * DT_NODELABEL(uac2_speaker) and DT_NODELABEL(in_terminal).
-	 * 48 kHz, 24-bit stereo (SP-1FX; the looper ran 16-bit), asynchronous with explicit feedback
+	 * 48 kHz stereo, 16-bit (alt 1) and 24-bit (alt 2, added in usbd_uac2.c), asynchronous with explicit feedback
 	 * (no implicit-feedback property => feedback endpoint present). */
 	uac2_speaker: usb_audio2 {
 		compatible = "zephyr,uac2";
@@ -94,8 +95,8 @@
 		as_iso_out: out_interface {
 			compatible = "zephyr,uac2-audio-streaming";
 			linked-terminal = <&in_terminal>;
-			subslot-size = <3>;
-			bit-resolution = <24>;
+			subslot-size = <2>;
+			bit-resolution = <16>;
 		};
 	};
 };
