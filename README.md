@@ -6,6 +6,8 @@ the four faders, and hear it on headphones or the speaker.
 
 **Firmware:** [`sp1fx.bin`](sp1fx.bin)
 
+**Latest release:** [v0.2.0](../../releases/tag/v0.2.0) · [all releases](../../releases)
+
 **Manual:** `SP-1FX-manual.pdf` on each [release](../../releases) (source: [`docs/manual/manual.md`](docs/manual/manual.md))
 
 > **Not yet run on a real SP-1.** It builds, the engine passes its tests, and the platform code
