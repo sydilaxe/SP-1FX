@@ -1,5 +1,6 @@
 SP-1FX test build for the Teenage Engineering SP-1: a four-effect processor. Audio in over USB-C (a
-class-compliant sound card, 48 kHz / 24-bit), out on headphones or the speaker.
+class-compliant sound card, 48 kHz, 16- or 24-bit: the host picks, so Linux handhelds such as the TrimUI Brick
+work too), out on headphones or the speaker.
 
 **Not yet tried on a real SP-1.** It builds, the engine passes its tests, and the platform code follows
 firmware that runs on the SP-1, but this binary has not been on hardware yet.
@@ -24,7 +25,7 @@ nothing jumps), TRACK 1-4 switch each effect off and on, PLAY bypasses all four,
 volume (3 dB steps), hold FUNCTION to power on (1.5 s) or off (2.5 s), hold TRACK 1 + 4 for 3 s to
 restart into the bootloader.
 
-**The sound:** full bandwidth: 48 kHz / 24-bit in and out, 32-bit float inside. With every fader at
+**The sound:** full bandwidth: 48 kHz, 16- or 24-bit in, 24-bit out, 32-bit float inside. With every fader at
 rest the output is the input, bit for bit, 1.3 ms later.
 
 **If something is wrong**, open the SP-1's USB serial port: a status line a second shows the faders, the

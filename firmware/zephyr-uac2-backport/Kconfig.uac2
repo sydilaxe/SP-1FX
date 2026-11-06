@@ -22,10 +22,11 @@ config USBD_UAC2_FS_WINDOWS_WORKAROUND
 	  (see zephyrproject-rtos/zephyr issue #77212).
 
 config USBD_UAC2_SP1_ALT24
-	bool "Second, 24-bit alternate setting on full-speed audio OUT (SP-1)"
+	bool "Second, 24-bit alternate setting on full-speed audio streams (SP-1)"
 	help
-	  Alternate setting 1 of each full-speed isochronous OUT streaming
-	  interface keeps the devicetree format (16-bit on the SP-1), and an
+	  Alternate setting 1 of each full-speed isochronous streaming
+	  interface (host to device with explicit feedback, or device to host
+	  asynchronous) keeps the devicetree format (16-bit on the SP-1), and an
 	  alternate setting 2 offers the same stream as 24-bit (3-byte
 	  subslots). The host picks: Linux handhelds that open the card as
 	  16-bit get alternate 1, computers that want 24-bit get alternate 2.

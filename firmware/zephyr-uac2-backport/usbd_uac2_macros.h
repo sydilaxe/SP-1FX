@@ -889,13 +889,18 @@
 			AS_EXPLICIT_FEEDBACK_ENDPOINT_HS_DESCRIPTOR_PTR(node)))	\
 	))
 
-/* SP-1: alternate setting 2, the same full-speed ISO OUT stream as 24-bit
- * (3-byte subslots). Appended after every other descriptor, so the indexes
- * of alternate 1's endpoints (ep_indexes, fb_indexes) do not move.
+/* SP-1: alternate setting 2, the same full-speed ISO stream as 24-bit
+ * (3-byte subslots): host to SP-1 (OUT, with its explicit feedback endpoint)
+ * or SP-1 to host (IN, asynchronous, no feedback endpoint). Appended after
+ * every other descriptor, so the indexes of alternate 1's endpoints
+ * (ep_indexes, fb_indexes) do not move.
  */
 #if defined(CONFIG_USBD_UAC2_SP1_ALT24)
 #define AS_ALT24_APPLIES(node)							\
-	UTIL_AND(AS_IS_USB_ISO_OUT(node), AS_HAS_EXPLICIT_FEEDBACK_ENDPOINT(node))
+	UTIL_OR(UTIL_AND(AS_IS_USB_ISO_OUT(node),				\
+			 AS_HAS_EXPLICIT_FEEDBACK_ENDPOINT(node)),		\
+		UTIL_AND(AS_IS_USB_ISO_IN(node),				\
+			 UTIL_NOT(DT_PROP(node, implicit_feedback))))
 
 #define AS_ALT24_FS_DESCRIPTORS_ARRAYS(node)					\
 	IF_ENABLED(AS_ALT24_APPLIES(node), (					\
@@ -920,9 +925,10 @@
 		       AS_SAMPLES_PER_FRAME(node)),	/* wMaxPacketSize */	\
 		AS_FS_DATA_EP_BINTERVAL(node),		/* bInterval */		\
 	};									\
+	IF_ENABLED(AS_HAS_EXPLICIT_FEEDBACK_ENDPOINT(node), (			\
 	static uint8_t DESCRIPTOR_NAME(fs_feedback24_ep, node)[] = {		\
 		AS_EXPLICIT_FEEDBACK_ENDPOINT_FS_DESCRIPTOR(node)		\
-	};))
+	};))))
 
 #define AS_ALT24_FS_DESCRIPTORS_PTRS(node)					\
 	IF_ENABLED(AS_ALT24_APPLIES(node), (					\
@@ -931,7 +937,8 @@
 	(struct usb_desc_header *) &DESCRIPTOR_NAME(as_format24_desc, node),	\
 	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_std_data24_ep, node),	\
 	(struct usb_desc_header *) &DESCRIPTOR_NAME(cs_data_ep, node),		\
-	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_feedback24_ep, node),))
+	IF_ENABLED(AS_HAS_EXPLICIT_FEEDBACK_ENDPOINT(node), (			\
+	(struct usb_desc_header *) &DESCRIPTOR_NAME(fs_feedback24_ep, node),))))
 
 #define AS_ALT24_ARRAYS_IF_AUDIOSTREAMING(node)					\
 	IF_ENABLED(UTIL_AND(DT_NODE_HAS_COMPAT(node, zephyr_uac2_audio_streaming),\
